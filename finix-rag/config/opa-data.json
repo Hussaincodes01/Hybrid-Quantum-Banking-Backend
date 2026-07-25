@@ -1,0 +1,14 @@
+{
+  "package": "finix.authz",
+  "data": {
+    "roles": {
+      "default": {
+        "admin": ["read", "write", "query", "ingest", "admin"],
+        "analyst": ["read", "query", "ingest"],
+        "auditor": ["read", "query"],
+        "teller": ["read", "query"],
+        "readonly": ["read", "query"]
+      }
+    }
+  }
+}

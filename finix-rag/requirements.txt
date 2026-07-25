@@ -1,0 +1,68 @@
+# FINIX RAG — core dependencies (Python 3.12, Windows/Linux).
+#
+# Install (GPU):
+#     python -m venv venv && venv\Scripts\activate
+#     pip install -U pip setuptools wheel
+#     pip install -r requirements.txt
+#
+# CPU users: add `--extra-index-url https://download.pytorch.org/whl/cpu` above
+# the first package line and append `+cpu` to the torch version pin below.
+
+# ── Core RAG framework (LlamaIndex 0.14 line — versions kept coherent so the
+#    resolver doesn't drift into an incompatible mix) ──────────────────────────
+llama-index-core==0.14.23
+llama-index-embeddings-huggingface==0.7.0
+llama-index-vector-stores-qdrant==0.10.2
+llama-index-readers-file==0.6.0
+llama-index-llms-groq==0.5.0
+# FIX: hybrid_retriever.py imports `llama_index.retrievers.bm25` — this package was
+# missing entirely, a hard ImportError at startup.
+llama-index-retrievers-bm25==0.7.1
+
+# ── Embedding & reranking models (BAAI/BGE-M3) ──────────────────────────────
+FlagEmbedding==1.4.0
+sentence-transformers==5.6.1
+transformers==4.57.6
+# FIX: pin huggingface-hub to the 0.x line. huggingface-hub 1.x removed the
+# `inference` extra that the ML stack requests (hence the repeated
+# "does not provide the extra 'inference'" warnings), and 1.x was being pulled in
+# transitively (chiefly by paddleocr). Keeping it <1 resolves the conflict.
+huggingface-hub>=0.34,<1.0
+torch>=2.6.0
+
+# ── Vector database ─────────────────────────────────────────────────────────
+qdrant-client==1.18.0
+
+# ── Security & cryptography ─────────────────────────────────────────────────
+hvac>=2.1.0                       # HashiCorp Vault client
+cryptography>=42.0.0              # AES-256, RSA, HMAC
+python-jose[cryptography]>=3.3.0  # JWT
+passlib[bcrypt]>=1.7.4            # password hashing
+pyotp>=2.9.0                      # TOTP/HOTP MFA
+
+# ── Authorization (OPA) ─────────────────────────────────────────────────────
+httpx>=0.27.0
+
+# ── FastAPI server ──────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+
+# ── Document processing (no OCR — see requirements-ocr.txt for PaddleOCR) ────
+pymupdf>=1.24.0
+python-multipart>=0.0.9
+
+# ── Read-only Postgres for the risk-validation plane (AI_ECOSYSTEM_ARCHITECTURE §6c)
+asyncpg>=0.29.0
+
+# ── Audit / logging / utilities ─────────────────────────────────────────────
+structlog>=24.1.0
+python-json-logger>=2.0.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+redis>=5.0.0
+aiofiles>=23.2.0
+
+# ── NeMo Guardrails — safety rails for LLM responses ─────────────────────────
+nemoguardrails>=0.10.0

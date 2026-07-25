@@ -1,0 +1,360 @@
+# =============================================================================
+# FINIX PRODUCTION - DOCKER COMPOSE FOR LOCAL DEVELOPMENT
+# =============================================================================
+# This docker-compose.yml uses the .env.example for configuration
+# Run: docker-compose --env-file .env up -d
+#
+# Services:
+#   - postgres: PostgreSQL 15 with pgvector extension
+#   - redis: Redis 7 with Redis Stack (for Redis Streams + modules)
+#   - qdrant: Qdrant 1.7+ vector database
+#   - vault: HashiCorp Vault for secrets/encryption
+#   - fabric: Hyperledger Fabric (optional - commented out by default)
+#   - finix-rag: Python RAG service (FastAPI)
+#   - backend: Go backend service
+#   - prometheus: Metrics collection
+#   - grafana: Dashboards
+#
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------
+  # POSTGRESQL - Primary Database
+  # ---------------------------------------------------------
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: finix-postgres
+    environment:
+      POSTGRES_DB: ${PGDATABASE:-finix}
+      POSTGRES_USER: ${PGUSER:-finix}
+      POSTGRES_PASSWORD: ${PGPASSWORD}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-finix} -d ${PGDATABASE:-finix}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - finix-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # ---------------------------------------------------------
+  # REDIS - Caching, Rate Limiting, Streams
+  # ---------------------------------------------------------
+  redis:
+    image: redis/redis-stack:7.2.0-v11
+    container_name: finix-redis
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - finix-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # ---------------------------------------------------------
+  # QDRANT - Vector Database for RAG
+  # ---------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: finix-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - finix-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+  # ---------------------------------------------------------
+  # VAULT - Secrets Management
+  # ---------------------------------------------------------
+  vault:
+    image: hashicorp/vault:1.14
+    container_name: finix-vault
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${VAULT_TOKEN:-dev-root-token}
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    volumes:
+      - vault_data:/vault/file
+      - ./config/vault:/vault/config:ro
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - finix-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # ---------------------------------------------------------
+  # OPA - Open Policy Agent (Authorization)
+  # ---------------------------------------------------------
+  opa:
+    image: openpolicyagent/opa:0.59
+    container_name: finix-opa
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "/policies"
+    volumes:
+      - ./config/opa-policy.rego:/policies/finix.rego:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8181/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - finix-network
+
+  # ---------------------------------------------------------
+  # PYTHON RAG SERVICE
+  # ---------------------------------------------------------
+  finix-rag:
+    build:
+      context: ./finix-rag
+      dockerfile: Dockerfile
+    container_name: finix-rag
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-finix_documents}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=${VAULT_TOKEN}
+      - OPA_URL=http://opa:8181
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:8080}
+      - ENABLE_PII_MASKING=${ENABLE_PII_MASKING:-true}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-m3}
+      - EMBEDDING_DEVICE=${EMBEDDING_DEVICE:-cpu}
+      - RERANKER_MODEL=${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      - RERANKER_DEVICE=${RERANKER_DEVICE:-cpu}
+      - RERANKER_SCORE_THRESHOLD=${RERANKER_SCORE_THRESHOLD:-0.10}
+      - RERANKER_TOP_K=${RERANKER_TOP_K:-5}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./finix-rag/config:/app/config:ro
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - finix-network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+  # ---------------------------------------------------------
+  # GO BACKEND SERVICE
+  # ---------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: finix-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - FINIX_ENV=${FINIX_ENV:-production}
+      - SERVER_ADDR=:8080
+      - SERVER_READ_TIMEOUT=${SERVER_READ_TIMEOUT:-30s}
+      - SERVER_WRITE_TIMEOUT=${SERVER_WRITE_TIMEOUT:-30s}
+      - SERVER_IDLE_TIMEOUT=${SERVER_IDLE_TIMEOUT:-120s}
+      - SERVER_SHUTDOWN_TIMEOUT=${SERVER_SHUTDOWN_TIMEOUT:-30s}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=${PGDATABASE:-finix}
+      - PGUSER=${PGUSER:-finix}
+      - PGPASSWORD=${PGPASSWORD}
+      - PGSSLMODE=${PGSSLMODE:-disable}
+      - PG_MAX_CONNS=${PG_MAX_CONNS:-25}
+      - FINIX_MIGRATIONS_DIR=${FINIX_MIGRATIONS_DIR:-migrations}
+      - REDIS_URL=redis://redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_DB=${REDIS_DB:-0}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - VAULT_ADDR=http://vault:8200
+      - VAULT_TOKEN=${VAULT_TOKEN}
+      - FABRIC_ENABLED=${FABRIC_ENABLED:-false}
+      - FINIX_JWT_SECRET=${FINIX_JWT_SECRET}
+      - FINIX_INTERNAL_TOKEN=${FINIX_INTERNAL_TOKEN}
+      - FINIX_AADHAAR_HASH_KEY=${FINIX_AADHAAR_HASH_KEY}
+      - FINIX_DATA_ENCRYPTION_KEY=${FINIX_DATA_ENCRYPTION_KEY}
+      - FINIX_REVOCATION_FAIL_CLOSED=${FINIX_REVOCATION_FAIL_CLOSED:-true}
+      - FINIX_PIN_ENFORCE=${FINIX_PIN_ENFORCE:-true}
+      - CERT_PINS=${CERT_PINS}
+      - FINIX_REQUIRE_PQC=${FINIX_REQUIRE_PQC:-false}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.1-8b-instant}
+      - AI_PROVIDER=${AI_PROVIDER:-remote}
+      - AIML_UPSTREAM_URL=http://finix-rag:8000
+      - FINIX_INTERNAL_TOKEN=${FINIX_INTERNAL_TOKEN}
+      - RAG_PG_DSN=postgres://${PGUSER:-finix}:${PGPASSWORD}@postgres:5432/${PGDATABASE:-finix}?sslmode=disable
+      - BANK_PROVIDER=${BANK_PROVIDER:-mock}
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET}
+      - KYC_PROVIDER=${KYC_PROVIDER:-mock}
+      - SIM_PROVIDER=${SIM_PROVIDER:-mock}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+      finix-rag:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - finix-network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  # ---------------------------------------------------------
+  # PROMETHEUS - Metrics Collection
+  # ---------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.47
+    container_name: finix-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - finix-network
+
+  # ---------------------------------------------------------
+  # GRAFANA - Dashboards
+  # ---------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.1
+    container_name: finix-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    networks:
+      - finix-network
+
+# ---------------------------------------------------------
+# VOLUMES
+# ---------------------------------------------------------
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  vault_data:
+  prometheus_data:
+  grafana_data:
+
+# ---------------------------------------------------------
+# NETWORKS
+# ---------------------------------------------------------
+networks:
+  finix-network:
+    driver: bridge
+    name: finix-network

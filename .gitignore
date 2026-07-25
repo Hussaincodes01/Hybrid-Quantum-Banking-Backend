@@ -1,0 +1,117 @@
+# =============================================================================
+# FINIX PRODUCTION - GIT IGNORE RULES
+# =============================================================================
+# This file prevents secrets, build artifacts, and generated files from being committed
+# =============================================================================
+
+# ==========================================
+# SECRETS & CREDENTIALS - NEVER COMMIT
+# ==========================================
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+vault-token.txt
+*.sops.yaml
+*.sops.yml
+
+# ==========================================
+# BUILD ARTIFACTS
+# ==========================================
+# Go
+backend/server.exe
+backend/finix-server*
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+env/
+.env
+.venv
+finix-rag/venv/
+
+# ==========================================
+# DEPENDENCIES
+# ==========================================
+backend/vendor/
+node_modules/
+
+# ==========================================
+# IDE & EDITOR
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# LOGS & TEMP FILES
+# ==========================================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+
+# ==========================================
+# DATABASE & VOLUMES
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+postgres_data/
+redis_data/
+qdrant_data/
+vault_data/
+
+# ==========================================
+# DOCKER
+# ==========================================
+.docker/
+docker-compose.override.yml
+
+# ==========================================
+# LOCAL CONFIG OVERRIDES
+# ==========================================
+config/local/
+*.local.yml
+*.local.yaml
+
+# ==========================================
+# OS SPECIFIC
+# ==========================================
+# Windows batch files - keep in repo but track properly
+# (scripts/start-local.bat is intentionally kept)
+*.bat
+*.cmd
+
+# ==========================================
+# TEST OUTPUTS
+# ==========================================
+finix-rag/tests/accuracy/last_report.json
+coverage.out

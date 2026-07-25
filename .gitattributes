@@ -1,0 +1,66 @@
+# =============================================================================
+# FINIX PRODUCTION - GIT ATTRIBUTES
+# =============================================================================
+# This file ensures consistent line endings across platforms
+# =============================================================================
+
+# Default behavior - treat text files as text, auto-detect line endings
+* text=auto
+
+# Explicitly declare text files to always use LF (Unix-style) line endings
+# This prevents CRLF/LF warnings on Windows
+*.go text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.sql text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+docker-compose.yaml text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# Windows batch files should use CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files - never convert line endings
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.pem binary
+*.key binary
+*.crt binary
+*.p12 binary
+*.pfx binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+
+# Documentation
+*.md text eol=lf
+*.rst text eol=lf
+*.txt text eol=lf
+
+# Config files
+*.conf text eol=lf
+*.config text eol=lf
+*.ini text eol=lf
+*.properties text eol=lf

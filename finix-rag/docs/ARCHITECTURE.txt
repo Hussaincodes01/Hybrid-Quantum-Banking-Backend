@@ -1,0 +1,377 @@
+
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                     FINIX RAG - SECURE BANKING ARCHITECTURE                ║
+# ║            Cryptographic Security + PII Protection + RBAC/ABAC             ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+                          ┌─────────────────────┐
+                          │    BANKING CLIENTS    │
+                          │  (Tellers, Analysts,  │
+                          │   Auditors, Admin)    │
+                          └──────────┬────────────┘
+                                     │
+                                     ▼
+              ╔═══════════════════════════════════════════════╗
+              ║         SECURITY PERIMETER (Gateway)          ║
+              ║  ┌─────────────────────────────────────────┐  ║
+              ║  │  TLS 1.3 Termination + Rate Limiting    │  ║
+              ║  │  Request Validation + CORS + Audit Log   │  ║
+              ║  └─────────────────────────────────────────┘  ║
+              ╚══════════════════════╦════════════════════════╝
+                                     │
+                                     ▼
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║                   FastAPI APPLICATION SERVER                     ║
+    ║                   (finix_rag/api.py)                             ║
+    ╠══════════════════════════════════════════════════════════════════╣
+    ║                                                                 ║
+    ║  ┌──────────────┐   ┌──────────────┐   ┌────────────────────┐   ║
+    ║  │  POST /auth  │   │ POST /ingest │   │   POST /query      │   ║
+    ║  │  /login      │   │   (PDF,JPG)  │   │   (question)       │   ║
+    ║  └──────┬───────┘   └──────┬───────┘   └────────┬───────────┘   ║
+    ║         │                  │                     │               ║
+    ║         ▼                  ▼                     ▼               ║
+    ║  ┌─────────────────────────────────────────────────────────────┐  ║
+    ║  │              JWT Authentication (HS256)                     │  ║
+    ║  │         python-jose | TokenManager | TokenPayload          │  ║
+    ║  │    Roles: admin | analyst | auditor | teller | readonly    │  ║
+    ║  └─────────────────────────┬───────────────────────────────────┘  ║
+    ╚═════════════════════════════╪══════════════════════════════════════╝
+                                  │
+                                  ▼
+    ╔══════════════════════════════════════════════════════════════════╗
+    ║               OPA AUTHORIZATION ENGINE                          ║
+    ║              (openpolicyagent/opa:8181)                          ║
+    ║                                                                 ║
+    ║   ┌─────────────────────────────────────────────────────────┐   ║
+    ║   │  Rego Policy: finix/authz                                │   ║
+    ║   │                                                          │   ║
+    ║   │  RBAC Rules:                                             │   ║
+    ║   │    admin  → read, write, query, ingest, admin            │   ║
+    ║   │    analyst→ read, query, ingest (clearance ≥ 3)          │   ║
+    ║   │    auditor→ read, query (clearance ≥ 3)                  │   ║
+    ║   │    teller → read, query (internal only)                  │   ║
+    ║   │    readonly→ query (public only)                         │   ║
+    ║   │                                                          │   ║
+    ║   │  ABAC Rules:                                             │   ║
+    ║   │    • Time-based: restricted docs only in business hours  │   ║
+    ║   │    • Tenant isolation: users see only their tenant       │   ║
+    ║   │    • Clearance levels: 1=public, 2=internal, 3=conf, 4=  │   ║
+    ║   │    • IP blocking: deny from suspicious ranges            │   ║
+    ║   │    • Account lockout: deny locked users                  │   ║
+    ║   └─────────────────────────────────────────────────────────┘   ║
+    ╚═════════════════════════════╪══════════════════════════════════════╝
+                                  │
+                 ┌────────────────┼────────────────┐
+                 ▼                                  ▼
+    ╔════════════════════════════╗    ╔═══════════════════════════════════╗
+    ║   PHASE 1: INGESTION      ║    ║   PHASE 2: QUERY                  ║
+    ║   (Offline Processing)    ║    ║   (Online Processing)             ║
+    ╚═══════════╤════════════════╝    ╚═══════════╤═════════════════════╝
+                │                                 │
+                ▼                                 ▼
+
+
+╔═══════════════════════════════════════╗  ╔══════════════════════════════════════════╗
+║        SECURE INGESTION PIPELINE      ║  ║         SECURE QUERY PIPELINE             ║
+║       (SecureIngestor)                ║  ║       (SecureQueryEngine)                 ║
+╠═══════════════════════════════════════╣  ╠══════════════════════════════════════════╣
+║                                       ║  ║                                          ║
+║  ┌─────────────────────────────────┐  ║  ║  ┌────────────────────────────────────┐   ║
+║  │ STEP 1: OCR EXTRACTION         │  ║  ║  │ STEP 1: PII DETECTION ON QUERY     │   ║
+║  │                                 │  ║  ║  │                                    │   ║
+║  │  ┌───────────────────────────┐  │  ║  ║  │  Detect: Aadhaar, PAN, IFSC,       │   ║
+║  │  │ PaddleOCR PP-Structure    │  │  ║  ║  │  UPI, Phone, Email, Account#       │   ║
+║  │  │                           │  │  ║  ║  │                                    │   ║
+║  │  │ • Text Detection (DB)     │  │  ║  ║  │  Strategy: tokenize → [AAD_xxxx]   │   ║
+║  │  │ • Text Recognition (CRNN) │  │  ║  ║  │                                    │   ║
+║  │  │ • Table Structure (SLA)   │  │  ║  ║  │  Prevents PII leakage through      │   ║
+║  │  │ • Layout Analysis         │  │  ║  ║  │  vector embeddings                  │   ║
+║  │  └─────────────┬─────────────┘  │  ║  ║  └──────────────────┬─────────────────┘   ║
+║  └────────────────┼────────────────┘  ║  ║                     │                     ║
+║                   │                   ║  ║                     ▼                     ║
+║                   ▼                   ║  ║  ┌────────────────────────────────────┐   ║
+║  ┌─────────────────────────────────┐  ║  ║  │ STEP 2: HYBRID RETRIEVAL           │   ║
+║  │ STEP 2: PII MASKING            │  ║  ║  │                                    │   ║
+║  │                                 │  ║  ║  │  ┌──────────┐    ┌──────────────┐ │   ║
+║  │  Original → [TOKENIZE] → Masked │  ║  ║  │  │  BM25    │    │ Dense Vector │ │   ║
+║  │                                 │  ║  ║  │  │Retrieval │    │   Search     │ │   ║
+║  │  • Aadhaar → [AAD_a1b2c3d4]    │  ║  ║  │  │          │    │              │ │   ║
+║  │  • PAN     → [PAN_e5f6g7h8]    │  ║  ║  │  │ Keyword  │    │ BGE-M3       │ │   ║
+║  │  • IFSC    → [IFS_i9j0k1l2]    │  ║  ║  │  │ matching │    │ Embeddings   │ │   ║
+║  │  • Phone   → [PHN_m3n4o5p6]    │  ║  ║  │  │          │    │              │ │   ║
+║  │  • Email   → [EMI_q7r8s9t0]    │  ║  ║  │  └─────┬────┘    └──────┬───────┘ │   ║
+║  │                                 │  ║  ║  │        │                │         │   ║
+║  │  Vault stores token→real map    │  ║  ║  │        └───────┬────────┘         │   ║
+║  │  (never in vector DB)           │  ║  ║  │                ▼                  │   ║
+║  └────────────────┬────────────────┘  ║  ║  │  ┌────────────────────────────┐   │   ║
+║                   │                   ║  ║  │  │ Reciprocal Rank Fusion     │   │   ║
+║                   ▼                   ║  ║  │  │ (RRF) Score Combination    │   │   ║
+║  ┌─────────────────────────────────┐  ║  ║  │  │                            │   │   ║
+║  │ STEP 3: DOCUMENT PROCESSING    │  ║  ║  │  │ score = w₁/(k+rank_bm25)  │   │   ║
+║  │                                 │  ║  ║  │  │      + w₂/(k+rank_dense)  │   │   ║
+║  │  • Text Cleaning (OCR artifacts)│  ║  ║  │  └────────────────────────────┘   │   ║
+║  │  • Metadata Extraction          │  ║  ║  └──────────────────┬─────────────────┘   ║
+║  │  • Title Extraction             │  ║  ║                     │                     ║
+║  │  • Document Classification      │  ║  ║                     ▼                     ║
+║  │  • Semantic Chunking (512 tok)  │  ║  ║  ┌────────────────────────────────────┐   ║
+║  │  • Deterministic Doc ID (SHA256)│  ║  ║  │ STEP 3: RERANKING                  │   ║
+║  └────────────────┬────────────────┘  ║  ║  │                                    │   ║
+║                   │                   ║  ║  │  ┌──────────────────────────────┐   │   ║
+║                   ▼                   ║  ║  │  │ BGE-Reranker-v2-M3           │   │   ║
+║  ┌─────────────────────────────────┐  ║  ║  │  │ (Cross-Encoder, 568M params) │   │   ║
+║  │ STEP 4: INTEGRITY HASHING      │  ║  ║  │  │                              │   │   ║
+║  │                                 │  ║  ║  │  │ Input: (query, document)     │   │   ║
+║  │  HMAC-SHA256(plaintext)         │  ║  ║  │  │ Output: relevance score [0,1]│   │   ║
+║  │  Stored in Qdrant payload       │  ║  ║  │  │                              │   │   ║
+║  │  → Tamper detection at query    │  ║  ║  │  │ Keeps top 5 most relevant    │   │   ║
+║  └────────────────┬────────────────┘  ║  ║  │  └──────────────────────────────┘   │   ║
+║                   │                   ║  ║  └──────────────────┬─────────────────┘   ║
+║                   ▼                   ║  ║                     │                     ║
+║  ┌─────────────────────────────────┐  ║  ║                     ▼                     ║
+║  │ STEP 5: EMBEDDING + STORAGE    │  ║  ║  ┌────────────────────────────────────┐   ║
+║  │                                 │  ║  ║  │ STEP 4: RESPONSE SYNTHESIS         │   ║
+║  │  ┌───────────────────────────┐  │  ║  ║  │                                    │   ║
+║  │  │  BGE-M3 Embedding Model   │  │  ║  ║  │  Groq API (Llama 3.3 / Qwen3)    │   ║
+║  │  │  (Multi-Functionality)    │  │  ║  ║  │                                    │   ║
+║  │  │                           │  │  ║  ║  │  Context = Top 5 reranked chunks   │   ║
+║  │  │  Dense: 1024-dim vectors  │  │  ║  ║  │  + System prompt (banking rules)   │   ║
+║  │  │  Sparse: BM25-like terms  │  │  ║  ║  │                                    │   ║
+║  │  │  Multi-vec: ColBERT       │  │  ║  ║  │  Output: Answer + Citations        │   ║
+║  │  └─────────────┬─────────────┘  │  ║  ║  │  + Confidence score                │   ║
+║  └────────────────┼────────────────┘  ║  ║  └──────────────────┬─────────────────┘   ║
+║                   │                   ║  ║                     │                     ║
+║                   ▼                   ║  ║                     ▼                     ║
+║  ┌─────────────────────────────────┐  ║  ║  ┌────────────────────────────────────┐   ║
+║  │                                 │  ║  ║  │ STEP 5: OUTPUT PII SANITIZATION    │   ║
+║  │    ╔══════════════════════╗     │  ║  ║  │                                    │   ║
+║  │    ║   QDRANT VECTOR DB   ║     │  ║  ║  │  Re-mask any PII that leaked       │   ║
+║  │    ║   (TLS + API Key)    ║     │  ║  ║  │  into the LLM response             │   ║
+║  │    ║                      ║     │  ║  ║  └──────────────────┬─────────────────┘   ║
+║  │    ║  ┌────────────────┐  ║     │  ║  ║                     │                     ║
+║  │    ║  │ Collection:    │  ║     │  ║  ║                     ▼                     ║
+║  │    ║  │ finix_documents│  ║     │  ║  ║  ┌────────────────────────────────────┐   ║
+║  │    ║  │                │  ║     │  ║  ║  │ STEP 6: AUDIT LOGGING              │   ║
+║  │    ║  │ Vector Store:  │  ║     │  ║  ║  │                                    │   ║
+║  │    ║  │ 1024-dim dense │  ║     │  ║  ║  │  structlog → JSON                   │   ║
+║  │    ║  │                │  ║     │  ║  ║  │  query_hash, user_id, role          │   ║
+║  │    ║  │ Payloads:      │  ║     │  ║  ║  │  department, tenant, auth_decision  │   ║
+║  │    ║  │  • doc_id      │  ║     │  ║  ║  │  confidence, answer_length          │   ║
+║  │    ║  │  • title       │  ║     │  ║  ║  └────────────────────────────────────┘   ║
+║  │    ║  │  • metadata    │  ║     │  ║  ║                                          ║
+║  │    ║  │  • classif.    │  ║     │  ║  ╚══════════════════════════════════════════╝
+║  │    ║  │  • HMAC hash   │  ║     │  ║
+║  │    ║  │  • tenant_id   │  ║     │  ║
+║  │    ║  └────────────────┘  ║     │  ║
+║  │    ╚══════════════════════╝     │  ║
+║  │                                 │  ║
+║  └─────────────────────────────────┘  ║
+╚═══════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    SECURITY INFRASTRUCTURE (Docker Compose)                  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                             ║
+║   ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  ║
+║   │   HASHICORP      │  │    QDRANT        │  │     OPEN POLICY AGENT   │  ║
+║   │   VAULT (:8200)  │  │   (:6333 REST)   │  │      OPA (:8181)        │  ║
+║   │                  │  │   (:6334 gRPC)    │  │                          │  ║
+║   │  Transit Engine  │  │                   │  │  Rego Policy Engine     │  ║
+║   │                  │  │  TLS: ENABLED     │  │                          │  ║
+║   │  • AES-256-GCM96 │  │  API Key: REQUIRED│  │  • RBAC Rules           │  ║
+║   │  • Key Rotation  │  │  Auth: REQUIRED   │  │  • ABAC Rules           │  ║
+║   │    (30 days)     │  │                   │  │  • Tenant Isolation     │  ║
+║   │  • Deletion: OFF │  │  HNSW Index:      │  │  • Time-based Access    │  ║
+║   │  • Audit Logging │  │  m=16, ef=100     │  │  • IP Blocking          │  ║
+║   │                  │  │                   │  │                          │  ║
+║   │  Encrypts:       │  │  Stores:          │  │  Evaluates:             │  ║
+║   │  • Embeddings    │  │  • Vector embeds  │  │  • Every query          │  ║
+║   │  • Metadata      │  │  • Document text  │  │  • Every ingestion      │  ║
+║   │  • PII tokens    │  │  • Metadata JSON  │  │  • Every document read  │  ║
+║   └──────────────────┘  └──────────────────┘  └──────────────────────────┘  ║
+║                                                                             ║
+║   ┌──────────────────┐  ┌──────────────────────────────────────────────┐    ║
+║   │   REDIS (:6379)  │  │         FINIX RAG APP (:8000)                │    ║
+║   │                  │  │                                              │    ║
+║   │  • Session Store │  │  ┌────────────────────────────────────────┐  │    ║
+║   │  • Query Cache   │  │  │  LlamaIndex Ingestion Pipeline         │  │    ║
+║   │  • Rate Limiting │  │  │  • SentenceSplitter (512 tok)          │  │    ║
+║   │  • Token Bloom   │  │  │  • TitleExtractor                      │  │    ║
+║   │                  │  │  │  • IngestionCache (Redis)              │  │    ║
+║   │  Auth: password  │  │  │  • DocstoreStrategy (UPSERTS)          │  │    ║
+║   └──────────────────┘  │  └────────────────────────────────────────┘  │    ║
+║                         │                                              │    ║
+║                         │  ┌────────────────────────────────────────┐  │    ║
+║                         │  │  FlagEmbedding (BGE Models)            │  │    ║
+║                         │  │  • BGE-M3: 569M params, 8192 tokens    │  │    ║
+║                         │  │  • Dense + Sparse + Multi-vec          │  │    ║
+║                         │  │  • 100+ languages                      │  │    ║
+║                         │  └────────────────────────────────────────┘  │    ║
+║                         └──────────────────────────────────────────────┘    ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        DATA FLOW - INGESTION PHASE                          ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                             ║
+║  PDF/Image ──► PaddleOCR ──► Raw Text ──► PII Mask ──► Clean ──► Chunk     ║
+║     │              │             │            │           │          │       ║
+║     │         ┌────┴────┐        │       ┌────┴────┐     │     ┌────┴───┐   ║
+║     │         │ Tables  │        │       │ Aadhaar │     │     │ 512    │   ║
+║     │         │ Layout  │        │       │ PAN     │     │     │ tokens │   ║
+║     │         │ Text    │        │       │ IFSC    │     │     │ overlap│   ║
+║     │         └─────────┘        │       │ Phone   │     │     │ 50     │   ║
+║     │                            │       │ Email   │     │     └────┬───┘   ║
+║     │                            │       └─────────┘     │          │       ║
+║     │                            │                       │          ▼       ║
+║     │                            │                       │    ┌──────────┐  ║
+║     │                            │                       │    │ HMAC-256 │  ║
+║     │                            │                       │    │ Integrity│  ║
+║     │                            │                       │    └────┬─────┘  ║
+║     │                            │                       │         │        ║
+║     │                            │                       │         ▼        ║
+║     │                            │                       │    ┌──────────┐  ║
+║     │                            │                       │    │ BGE-M3   │  ║
+║     │                            │                       │    │ Embed    │  ║
+║     │                            │                       │    │ 1024-dim │  ║
+║     │                            │                       │    └────┬─────┘  ║
+║     │                            │                       │         │        ║
+║     │                            │                       │         ▼        ║
+║     │                            │                       │    ╔══════════╗  ║
+║     │                            │                       │    ║  QDRANT  ║  ║
+║     │                            │                       │    ║  Vector  ║  ║
+║     │                            │                       │    ║  + Meta  ║  ║
+║     │                            │                       │    ║  + HMAC  ║  ║
+║     │                            │                       │    ╚══════════╝  ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        DATA FLOW - QUERY PHASE                              ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                             ║
+║  User Query ──► JWT Auth ──► OPA Check ──► PII Mask ──► Retrieve           ║
+║      │              │            │             │             │              ║
+║      │         ┌────┴────┐  ┌────┴────┐   ┌────┴────┐  ┌────┴──────────┐   ║
+║      │         │ Validate│  │ RBAC +  │   │ Mask PII│  │ BM25 + Dense  │   ║
+║      │         │ Token   │  │ ABAC    │   │ in query│  │ (RRF Fusion)  │   ║
+║      │         │ Expiry  │  │ Rules   │   │         │  │               │   ║
+║      │         │ Revoked?│  │ Tenant  │  │ [PHN_xx]│  │ Top 20 Chunks │   ║
+║      │         └─────────┘  │ Time    │  └─────────┘  └───────┬───────┘   ║
+║      │                      │ IP      │                       │           ║
+║      │                      └─────────┘                       ▼           ║
+║      │                                                     ┌──────────┐   ║
+║      │                                                     │ RERANK   │   ║
+║      │                                                     │ BGE-v2-M3│   ║
+║      │                                                     │ Top 5    │   ║
+║      │                                                     └─────┬────┘   ║
+║      │                                                           │        ║
+║      │                                                           ▼        ║
+║      │                                                     ┌──────────┐   ║
+║      │                                                     │ LLM      │   ║
+║      │                                                     │ Groq API │   ║
+║      │                                                     │ Llama 3.3│   ║
+║      │                                                     │ or Qwen3 │   ║
+║      │                                                     └─────┬────┘   ║
+║      │                                                           │        ║
+║      │                                                           ▼        ║
+║      │                                                     ┌──────────┐   ║
+║      │                                                     │ Sanitize │   ║
+║      │                                                     │ Output   │   ║
+║      │                                                     │ Re-mask  │   ║
+║      │                                                     │ PII      │   ║
+║      │                                                     └─────┬────┘   ║
+║      │                                                           │        ║
+║      │                                                           ▼        ║
+║  Response + Citations + Confidence + Audit Log                      │        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                    SECURITY LAYERS - DEFENSE IN DEPTH                       ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                             ║
+║  Layer 1: TRANSPORT SECURITY                                                ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  TLS 1.3 on all connections (Vault, Qdrant, OPA, API)              │    ║
+║  │  Certificate rotation every hour (Qdrant auto-refresh)              │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+║  Layer 2: AUTHENTICATION                                                    ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  JWT HS256 tokens with expiry (30 min default)                      │    ║
+║  │  Token revocation via JTI tracking                                  │    ║
+║  │  5 roles: admin, analyst, auditor, teller, readonly                 │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+║  Layer 3: AUTHORIZATION (RBAC + ABAC)                                       ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  OPA Rego policies evaluated per request                            │    ║
+║  │  Clearance levels: 1=public, 2=internal, 3=confidential, 4=rest.   │    ║
+║  │  Tenant isolation: users scoped to their tenant                     │    ║
+║  │  Time-based: restricted docs only during business hours             │    ║
+║  │  IP-based: block suspicious IP ranges                               │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+║  Layer 4: PII PROTECTION                                                    ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  Indian banking PII: Aadhaar, PAN, IFSC, UPI, GST, Phone, Email    │    ║
+║  │  Strategy: tokenize before embedding (prevents embedding leakage)   │    ║
+║  │  Vault stores token→real mapping (never in vector DB)               │    ║
+║  │  Output sanitization: re-mask PII in LLM responses                  │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+║  Layer 5: ENCRYPTION AT REST                                                ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  Vault Transit Engine: AES-256-GCM96                                │    ║
+║  │  Auto-rotation every 30 days                                        │    ║
+║  │  Deletion disabled (compliance)                                     │    ║
+║  │  Batch encrypt/decrypt for performance                              │    ║
+║  │  Fallback: local AES-256-GCM if Vault unavailable                   │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+║  Layer 6: DATA INTEGRITY                                                    ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  HMAC-SHA256 on every document chunk                                │    ║
+║  │  Stored in Qdrant payload alongside vectors                         │    ║
+║  │  Verified at query time for tamper detection                        │    ║
+║  │  Deterministic doc IDs (SHA256 of content)                          │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+║  Layer 7: AUDIT LOGGING                                                     ║
+║  ┌─────────────────────────────────────────────────────────────────────┐    ║
+║  │  structlog → JSON → file/SIEM                                       │    ║
+║  │  Logged: user_id, query_hash, role, department, tenant              │    ║
+║  │          auth_decision, confidence, answer_length, timestamp        │    ║
+║  │  Query text stored as SHA256 hash (never plaintext in logs)         │    ║
+║  └─────────────────────────────────────────────────────────────────────┘    ║
+║                                                                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                         TECHNOLOGY STACK                                     ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║                                                                             ║
+║  ┌─────────────────┬───────────────────────────────────────────────────┐    ║
+║  │ Component       │ Tool (Open Source / GitHub)                       │    ║
+║  ├─────────────────┼───────────────────────────────────────────────────┤    ║
+║  │ OCR Engine      │ PaddlePaddle/PaddleOCR (PP-StructureV3)          │    ║
+║  │ Embeddings      │ BAAI/bge-m3 via FlagOpen/FlagEmbedding           │    ║
+║  │ Reranker        │ BAAI/bge-reranker-v2-m3 via FlagOpen             │    ║
+║  │ Vector DB       │ qdrant/qdrant (TLS + API Key + JWT)              │    ║
+║  │ RAG Framework   │ run-llama/llama_index (IngestionPipeline)        │    ║
+║  │ LLM             │ Groq API (Llama 3.3 / Qwen3)                     │    ║
+║  │ Encryption      │ hashicorp/vault (Transit Engine)                  │    ║
+║  │ Authorization   │ openpolicyagent/opa (Rego policies)              │    ║
+║  │ Auth Tokens     │ python-jose (JWT HS256)                          │    ║
+║  │ Cache/Session   │ redis/redis (append-only persistence)            │    ║
+║  │ API Server      │ tiangolo/fastapi + uvicorn                        │    ║
+║  │ PDF Processing  │ PyMuPDF/pymupdf                                   │    ║
+║  │ Crypto (local)  │ pyca/cryptography (AES-GCM, RSA, HMAC)           │    ║
+║  │ Logging         │ hynek/structlog (structured JSON)                 │    ║
+║  └─────────────────┴───────────────────────────────────────────────────┘    ║
+║                                                                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝

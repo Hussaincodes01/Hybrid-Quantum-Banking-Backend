@@ -1,0 +1,19 @@
+=== FEATURE WEIGHTS ===
+
+                 feature   importance   weight
+             fraud_label 1.396405e+06 0.385618
+  beneficiary_abuse_risk 1.168563e+06 0.322699
+             hour_of_day 3.943610e+05 0.108903
+   account_takeover_risk 3.138874e+05 0.086680
+      is_new_beneficiary 1.252549e+05 0.034589
+      device_trust_score 8.200468e+04 0.022646
+    session_duration_sec 7.248048e+04 0.020016
+amount_vs_baseline_ratio 2.760246e+04 0.007622
+       merchant_category 1.598053e+04 0.004413
+            otp_attempts 1.353799e+04 0.003739
+                  amount 1.108118e+04 0.003060
+                txn_type 5.389340e+01 0.000015
+                 user_id 0.000000e+00 0.000000
+                  txn_id 0.000000e+00 0.000000
+         login_gap_hours 0.000000e+00 0.000000
+             day_of_week 0.000000e+00 0.000000

@@ -1,0 +1,18 @@
+# FINIX RAG — OPTIONAL OCR extras (PaddleOCR document-ingestion path only).
+#
+# Kept SEPARATE from requirements.txt on purpose: paddleocr pulls paddlex →
+# modelscope → huggingface-hub 1.x, which removed the `inference` extra and
+# conflicts with the RAG embedding stack (huggingface-hub 0.x). Installing OCR in
+# the SAME environment as the core is what produced the repeated
+# "huggingface-hub … does not provide the extra 'inference'" errors.
+#
+# ocr_engine.py imports paddle lazily, so the RAG query/ingest pipeline runs fine
+# WITHOUT this file. Only install it if you need PaddleOCR — ideally in a separate
+# virtualenv, or accept that it will upgrade huggingface-hub past 1.0:
+#
+#     pip install -r requirements-ocr.txt
+#
+# paddlepaddle here is the CPU build. For GPU use paddlepaddle-gpu per PaddlePaddle's
+# install matrix (https://www.paddlepaddle.org.cn/install/quick).
+paddleocr>=3.0.0
+paddlepaddle>=3.0.0

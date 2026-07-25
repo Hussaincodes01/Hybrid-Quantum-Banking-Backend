@@ -1,0 +1,68 @@
+{
+  "security": {
+    "fraud_label": {
+      "active_version": "v1",
+      "weights_path": "backend/models/security/fraud_label/v1/model.onnx",
+      "preprocessor_path": "backend/models/security/fraud_label/v1/preprocess.joblib"
+    },
+    "account_takeover_risk": {
+      "active_version": "v1",
+      "weights_path": "backend/models/security/account_takeover_risk/v1/model.onnx",
+      "preprocessor_path": "backend/models/security/account_takeover_risk/v1/preprocess.joblib"
+    },
+    "beneficiary_abuse_risk": {
+      "active_version": "v1",
+      "weights_path": "backend/models/security/beneficiary_abuse_risk/v1/model.onnx",
+      "preprocessor_path": "backend/models/security/beneficiary_abuse_risk/v1/preprocess.joblib"
+    },
+    "action_class": {
+      "active_version": "v1",
+      "weights_path": "backend/models/security/action_class/v1/model.onnx",
+      "preprocessor_path": "backend/models/security/action_class/v1/preprocess.joblib"
+    }
+  },
+  "behaviour": {
+    "user_segment": {
+      "active_version": "v1",
+      "weights_path": "backend/models/behaviour/user_segment/v1/model.onnx",
+      "preprocessor_path": "backend/models/behaviour/user_segment/v1/preprocess.joblib"
+    },
+    "behaviour_stability_band": {
+      "active_version": "v1",
+      "weights_path": "backend/models/behaviour/behaviour_stability_band/v1/model.onnx",
+      "preprocessor_path": "backend/models/behaviour/behaviour_stability_band/v1/preprocess.joblib"
+    },
+    "spending_discipline_band": {
+      "active_version": "v1",
+      "weights_path": "backend/models/behaviour/spending_discipline_band/v1/model.onnx",
+      "preprocessor_path": "backend/models/behaviour/spending_discipline_band/v1/preprocess.joblib"
+    },
+    "goal_completion_band": {
+      "active_version": "v1",
+      "weights_path": "backend/models/behaviour/goal_completion_band/v1/model.onnx",
+      "preprocessor_path": "backend/models/behaviour/goal_completion_band/v1/preprocess.joblib"
+    }
+  },
+  "investment": {
+    "risk_profile": {
+      "active_version": "v1",
+      "weights_path": "backend/models/investment/risk_profile/v1/model.onnx",
+      "preprocessor_path": "backend/models/investment/risk_profile/v1/preprocess.joblib"
+    },
+    "sip_action": {
+      "active_version": "v1",
+      "weights_path": "backend/models/investment/sip_action/v1/model.onnx",
+      "preprocessor_path": "backend/models/investment/sip_action/v1/preprocess.joblib"
+    },
+    "goal_priority": {
+      "active_version": "v1",
+      "weights_path": "backend/models/investment/goal_priority/v1/model.onnx",
+      "preprocessor_path": "backend/models/investment/goal_priority/v1/preprocess.joblib"
+    },
+    "asset_mix_template": {
+      "active_version": "v1",
+      "weights_path": "backend/models/investment/asset_mix_template/v1/model.onnx",
+      "preprocessor_path": "backend/models/investment/asset_mix_template/v1/preprocess.joblib"
+    }
+  }
+}

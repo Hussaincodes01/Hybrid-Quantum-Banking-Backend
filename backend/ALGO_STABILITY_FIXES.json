@@ -1,0 +1,84 @@
+{
+  "module": "ALGO_STABILITY_FIXES",
+  "goal": "Fix the unstable algorithms identified in ALGORITHM_ANALYSIS.md: GNN N-hop reverse-edge scan + repeated traversal + 64-bit hash collisions, pattern-based scoring false positives, and ledger rule linear scans. Debt waterfall edge-case handling is secondary.",
+  "context": "FINIX Go backend at D:\\PSB forged\\PSB Golang Stack\\backend. All monetary values are int64 paise. Pure domain math lives under internal/domain/. Verified against source on 2026-07-21: gnn.go line 147 does `math.Max(risk, patternRisk)`; computeNHopRisk lines 191-207 do `for otherID, otherNode := range fg.nodes` (full-map reverse scan) per recursive call; GetRiskScore calls computeNHopRisk under RLock (lines 141-143); hashRecipient returns hex.EncodeToString(h[:8]) (64-bit); GraphEdge has only a `To` field (no `From`); blockchain rule signature is `Evaluate(event Event, events []Event) SmartContractResult`.",
+  "correctness_warnings": [
+    "DO NOT memoize computeNHopRisk internally by (nodeID, hopsRemaining). Its result is PATH-DEPENDENT (depends on the current `visited` set for cycle-breaking), so caching partial recursion results returns wrong risk when the same node is reached via a different path. Memoize only the TOP-LEVEL GetRiskScore(nodeID) result, invalidated by a generation counter that bumps on any mutation.",
+    "computeNHopRisk currently runs under RLock (GetRiskScore lines 141-143). Any memo WRITE cannot happen under RLock. Either (a) take the full Lock in GetRiskScore when computing+caching, or (b) use a dedicated sync.Mutex guarding only the memo map. Do not write shared state under RLock.",
+    "GraphEdge has no `From` field, so a reverse index of type []*GraphEdge loses the sender identity. Key the reverse index by sender ID: use map[targetID]map[senderID]*GraphEdge (or add a From field to GraphEdge).",
+    "pruneOldNodes deletes nodes but must also delete their entries from the reverse index (inEdges) and the memo, or you leak stale pointers and serve stale cached risk."
+  ],
+  "files_to_edit": [
+    "internal/domain/fraud/gnn.go",
+    "internal/domain/blockchain/ledger.go",
+    "internal/domain/debt/optimise.go (optional, lower priority)"
+  ],
+  "files_to_create": [
+    "internal/domain/fraud/gnn_test.go (extend if present)",
+    "internal/domain/fraud/gnn_bench_test.go",
+    "internal/domain/blockchain/ledger_rules_test.go (extend if present)"
+  ],
+  "requirements": [
+    {
+      "id": "GNN-1",
+      "title": "Reverse-edge index to kill the O(V) per-hop scan",
+      "detail": "Add a reverse adjacency index to FraudGraph: `inEdges map[string]map[string]*GraphEdge` (targetID -> senderID -> edge; reuse the SAME *GraphEdge pointer created for the forward edge). Populate it in AddTransaction right after the forward edge is created/updated. In computeNHopRisk, replace the full-map loop at lines 191-207 with iteration over `fg.inEdges[nodeID]` only, checking each sender's IsFraud/IsMule flag. Complexity per call drops from O(V) to O(in-degree). Update pruneOldNodes to also remove pruned node IDs from inEdges (both as a key and from other nodes' sender maps)."
+    },
+    {
+      "id": "GNN-2",
+      "title": "Top-level result memoization with generation counter (sound version)",
+      "detail": "Add `gen uint64` and `cache map[string]cachedRisk` to FraudGraph, where `cachedRisk struct{ risk float64; gen uint64 }`. Increment `gen` inside AddTransaction, MarkAsFraud, MarkAsMule, and pruneOldNodes (under the existing write lock). In GetRiskScore: after resolving the node, if `cache[nodeID].gen == fg.gen` return the cached risk; otherwise compute (reverse-indexed) risk, store `{risk, fg.gen}`, and return. Do the compute+store under the FULL Lock (not RLock) OR guard cache with its own mutex. Do NOT memoize inside computeNHopRisk (see correctness_warnings). Invalidation is O(1): bumping gen logically expires all entries without clearing the map."
+    },
+    {
+      "id": "GNN-3",
+      "title": "Widen hash to eliminate collisions",
+      "detail": "Change hashRecipient to `hex.EncodeToString(h[:16])` (128-bit). nodeID is already a string, so no type change is needed — only the slice bound. Birthday collision at 10k nodes drops from ~1.5% to negligible. Confirm all callers still treat node IDs as opaque strings."
+    },
+    {
+      "id": "PATTERN-1",
+      "title": "Stop pattern score from overriding graph evidence",
+      "detail": "In GetRiskScore, remove `math.Max(risk, patternRisk)` at line 147. patternBasedScore must ONLY apply when the recipient node is unknown (the existing early-return at line 129 already handles this). For a known node, return the graph-derived `risk` directly. This ensures a keyword can never override real graph structure."
+    },
+    {
+      "id": "PATTERN-2",
+      "title": "Token-based, weighted, capped pattern scoring",
+      "detail": "Replace substring `strings.Contains` matching with whole-token matching: lowercase, split the recipient on non-alphanumeric boundaries into a token set, and match tokens against keyword maps. Use weighted keywords (map[string]float64) summed and capped at 0.5 so a pattern-only signal can never masquerade as confirmed fraud/mule risk (which are 0.8/1.0). Keep the empty-recipient (0.5) and very-short (<=3 chars) heuristics. Optional: if env FINIX_USE_BERT is truthy, make patternBasedScore return a neutral low prior (0.1) as a no-op placeholder for the planned ML classifier."
+    },
+    {
+      "id": "LEDGER-1",
+      "title": "Indexed RuleQuery to replace per-rule linear scans",
+      "detail": "Introduce `type RuleQuery interface { EventsByUser(userID string) []Event; EventsByUserAndAction(userID, action string) []Event; EventByPayloadHash(hash string) (Event, bool) }`. Add an in-memory implementation that builds indexes from the events slice ONCE (O(n) build): map[userID][]Event, map[userID+action][]Event, map[payloadHash]Event. Change SmartContractRule.Evaluate from `Evaluate(event Event, events []Event) SmartContractResult` to `Evaluate(event Event, q RuleQuery) SmartContractResult`. Update CoolingOffRule, ConsentRevocationRule, DoubleSpendRule to use the indexed lookups (O(1)/O(matches) instead of O(n)). Update all callers to build the index once per evaluation batch and pass it in. Preserve existing rule semantics and violation messages exactly."
+    },
+    {
+      "id": "DEBT-1",
+      "title": "(Optional) Distinguish cap-reached from paid-off + precision",
+      "detail": "In simulateWaterfall/Schedule, when the loop reaches monthCap (1200) without the balance clearing, return a sentinel error `ErrMonthCapReached` instead of returning silently, so callers can tell 'not paid off within 100 years' from 'paid off'. Propagate through PrepaymentImpact and ForeclosureDecision. For interest totals shown as rupee figures, prefer integer-paise accumulation over float; if keeping float, use Kahan summation (track a compensation term) to bound drift across up to 1200 iterations."
+    }
+  ],
+  "tests": [
+    "GNN correctness: build a small hand-checkable graph (fraud node -> A -> B), assert GetRiskScore(B) equals expected decayed value AND matches the value produced by the pre-refactor full-scan implementation for several fixtures (guard against the reverse-index/memo changing results).",
+    "GNN memo invalidation: score a node, MarkAsFraud a neighbour, score again — result must reflect the mutation (gen bumped), not the stale cache.",
+    "GNN hash: two distinct recipients must produce distinct node IDs (regression guard on width).",
+    "GNN benchmark (gnn_bench_test.go): seed a 10k-node graph with realistic branching and b.Run GetRiskScore at maxHops=3; record ns/op before/after (numbers are illustrative, assert it completes, not a hard ms bound in CI).",
+    "Pattern: patternBasedScore(\"investment opportunity\") <= 0.5 and does NOT return 0.9; token 'invest' alone within a legit merchant name does not trigger high risk; patternBasedScore(\"unknown urgent lottery\") stays high (>=0.5 capped, or preserved per weighting).",
+    "Pattern override: for a KNOWN low-risk node whose name contains 'new'/'offer', GetRiskScore returns the graph risk, not an inflated pattern value.",
+    "Ledger: build RuleQuery over 100k synthetic events; assert CoolingOffRule/ConsentRevocationRule/DoubleSpendRule produce identical results to the old linear-scan implementation on the same fixtures (behavioural equivalence), and that lookups don't re-scan the full slice.",
+    "Debt (if implemented): a loan that cannot amortise within 1200 months returns ErrMonthCapReached; a normal loan returns nil error and a schedule whose principal sums to the original."
+  ],
+  "acceptance_criteria": [
+    "gofmt -l . is empty; go vet ./... clean; go build ./... passes.",
+    "go test ./... passes, including new equivalence tests proving the refactors did NOT change outputs.",
+    "computeNHopRisk no longer iterates fg.nodes; it iterates fg.inEdges[nodeID].",
+    "No shared state (memo/cache) is written under RLock.",
+    "hashRecipient emits >= 128-bit IDs.",
+    "GetRiskScore returns graph risk for known nodes with no math.Max pattern override.",
+    "Blockchain rules take RuleQuery, not []Event, and build indexes once.",
+    "Debt waterfall (if done) returns ErrMonthCapReached instead of silent truncation."
+  ],
+  "constraints": [
+    "Behavioural equivalence: these are performance/correctness refactors — do not change risk values, tiers, or rule violation semantics except where explicitly fixing the pattern-override bug.",
+    "Preserve thread-safety; all map access stays under the appropriate lock.",
+    "Do not rename exported types/methods or JSON fields that callers/clients depend on; add rather than rename.",
+    "Line numbers reflect the file as of 2026-07-21 — reconfirm before editing."
+  ]
+}

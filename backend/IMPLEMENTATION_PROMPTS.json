@@ -1,0 +1,297 @@
+{
+  "task": "Implement the FINIX 'Srishti Math' spec gaps by replacing hardcoded/stub handler responses with real deterministic domain logic, and by hardening the transaction risk score.",
+  "context": {
+    "project": "FINIX Go banking backend",
+    "root": "backend/",
+    "spec_source": "FINIX Srishti Math.docx",
+    "layout_convention": "Pure, testable math lives in internal/domain/<name>/ (see existing internal/domain/{transaction,healthscore,fraud}). Service layer (internal/domain/platform) orchestrates and holds state; handlers in service_expansion.go / router.go return JSON.",
+    "money_convention": "All monetary values are int64 paise. 1 rupee = 100 paise. Never use float for money storage; float is acceptable only for intermediate rate math, round back to int64 paise.",
+    "guiding_principle": "The spec's thesis is that these numbers must be mathematically real and reproducible for RBI model-risk audit, not illustrative. No approximations where a full simulation is feasible. Every threshold/weight/rate must be versioned config, not a magic literal."
+  },
+  "global_instructions": [
+    "Create new domain packages as pure functions with no I/O and no mutexes; unit-test each formula with table-driven tests.",
+    "Replace map[string]any{...} literals in handlers with calls into the new domain packages.",
+    "Do not change existing route paths or JSON field names that the Flutter client consumes; add fields, don't rename.",
+    "Run gofmt, go vet, and golangci-lint; add tests and ensure `go test ./...` passes before considering an item done.",
+    "Where a value is currently a magic literal (risk tiers 40/70, cooling-off 6h, foreclosure 0.08/0.015, meanGrowth 0.07, stdDev 0.12), source it from a versioned ModelParams config struct instead.",
+    "Preserve XAI explanation strings but make them reflect the computed numbers, not canned text."
+  ],
+  "prompts": [
+    {
+      "id": "P1",
+      "title": "Debt Optimisation Engine — core amortisation primitives",
+      "spec_ref": "§4.1",
+      "priority": "highest",
+      "self_contained": true,
+      "create": "internal/domain/debt/amortisation.go + amortisation_test.go",
+      "requirements": [
+        "EMI(principalPaise int64, annualRatePct float64, months int) int64 using EMI = P·r·(1+r)^n/((1+r)^n − 1), r = annualRatePct/12/100. Handle r==0 (return P/n) and months<=0 (error or 0).",
+        "Schedule(principalPaise int64, annualRatePct float64, months int) []Row where Row{Month int; InterestPaise, PrincipalPaise, BalancePaise int64}; simulate the full table, InterestComponent(k)=Balance(k-1)·r, PrincipalComponent(k)=EMI−Interest, Balance(k)=Balance(k-1)−Principal.",
+        "TotalInterest(rows []Row) int64 summing the schedule (do NOT approximate).",
+        "SolveTenure(principalPaise int64, annualRatePct float64, emiPaise int64) int for floating-rate tenure recompute: n = -ln(1 - P·r/EMI)/ln(1+r).",
+        "Round money to int64 paise at each step; final row balance must reach ~0."
+      ],
+      "tests": [
+        "Known EMI: 10,00,000 principal at 9% for 60 months ≈ ₹20,758/mo (verify against a standard EMI calculator).",
+        "Sum of PrincipalPaise across schedule == original principal (±rounding).",
+        "r==0 edge case; single-month loan; zero principal."
+      ]
+    },
+    {
+      "id": "P2",
+      "title": "Debt Optimisation Engine — prepayment, foreclosure, avalanche/snowball, repo recompute",
+      "spec_ref": "§4.2–§4.4",
+      "priority": "highest",
+      "self_contained": true,
+      "depends_on": ["P1"],
+      "create": "internal/domain/debt/optimise.go + optimise_test.go",
+      "replace_stubs_in": "internal/domain/platform/service_expansion.go handleLoanEndpoints (loan_prepayment_simulate, loan_foreclosure_check, loan_optimisation_strategy, loan_rate_update_notify)",
+      "requirements": [
+        "PrepaymentImpact(loan, extraPaise, extraMonth): run Schedule twice (baseline vs. balance reduced by extra at extraMonth, re-amortised at same EMI); return InterestSavedPaise = TotalInterest(base)−TotalInterest(prepay) and TenureReducedMonths = len(base)−len(prepay). Replaces the current `extra*14` and `11` literals.",
+        "ForeclosurePenaltyRate(loanType string, floating bool) float64: MUST return 0 for floating-rate individual retail loans per RBI 2014 circular (this is a compliance correctness fix — current code hardcodes has_penalty:true which is wrong). Fixed-rate/business loans use a versioned lender rate.",
+        "ForeclosureDecision: NetBenefit = RemainingInterestIfHeld − PenaltyAmount − OpportunityCost, where OpportunityCost = amountUsed × (expectedInvestmentReturn − loanRate) × remainingYears. Flag 'not recommended' when NetBenefit < 0. XAI must show the opportunity-cost term explicitly, not just penalty-vs-savings.",
+        "OptimiseStrategy(loans []Loan, extraTarget int64, adherenceScore float64): simulate avalanche (sort by rate desc) and snowball (sort by balance asc) waterfalls; return both total-interest numbers, InterestCostOfSnowball = avalanche−snowball (always ≥0), and RecommendedStrategy per §4.3 rule (Avalanche unless documented low adherence). XAI must show BOTH numbers regardless of recommendation.",
+        "RepoRateRecompute(loan, deltaRepoBps float64, transmissionFactor float64): newRate = oldRate + deltaRepoBps/10000·transmissionFactor; recompute EMI via P1. Replaces hardcoded 2915000.",
+        "ExpectedInvestmentReturn and transmissionFactor come from versioned config."
+      ],
+      "tests": [
+        "Snowball total interest ≥ avalanche total interest (never worse).",
+        "Floating individual loan → penalty == 0; fixed loan → penalty > 0.",
+        "Foreclosure with loan rate below expected return → NetBenefit negative (not recommended) even with zero penalty.",
+        "Prepayment reduces tenure, not EMI, by default."
+      ]
+    },
+    {
+      "id": "P3",
+      "title": "Credit Utilisation & BNPL EffectiveAPR",
+      "spec_ref": "§8",
+      "priority": "high",
+      "self_contained": true,
+      "create": "internal/domain/credit/credit.go + credit_test.go",
+      "replace_stubs_in": "service_expansion.go handleLoanEndpoints (loan_credit_utilisation returns constant 0.27; loan_bnpl returns hardcoded LazyPay)",
+      "requirements": [
+        "Utilisation(outstandingPaise, limitPaise int64) float64 per card; AggregateUtilisation(cards) = Σoutstanding/Σlimit. Surface BOTH per-card and aggregate (a maxed single card is hidden by aggregate).",
+        "Alert when a card crosses 0.30 BEFORE statement date; implement T-5-day lead-time check against statement_date.",
+        "EffectiveAPR(totalRepayablePaise, principalPaise int64, tenureDays int) float64 = ((totalRepayable/principal) − 1) × (365/tenureDays). Show side-by-side with the headline (often '0%') rate.",
+        "IsBNPLObligation(mcc string, counterparty string) bool via MCC set + provider-name registry (versioned config).",
+        "Expose a helper so BNPL principal outstanding is included in TotalDebt for the health-score DTI (P6) and debt engine (P2)."
+      ],
+      "tests": [
+        "0.30 threshold boundary; aggregate-fine-but-one-card-maxed case.",
+        "EffectiveAPR of a '0% headline' BNPL with fees materially > 0.",
+        "T-5 alert fires before statement date, not after."
+      ]
+    },
+    {
+      "id": "P4",
+      "title": "Transaction risk score — unit/denominator safety (clipping + floors)",
+      "spec_ref": "§1.1",
+      "priority": "highest",
+      "self_contained": true,
+      "modify": "internal/domain/transaction/heuristic.go, model.go",
+      "requirements": [
+        "This is the spec's #1 'security-relevant bug' concern: unclipped ratios cause NaN/Inf and silent false-HIGH/false-LOW.",
+        "Clip AmountVsAverage to [0,25] and BalanceImpact to [0,1] before weighting (add a normalise step in signalToFeatures or at top of assess()).",
+        "Floor denominators where the ratios are computed upstream: user_avg_amount uses FLOOR_AVG = ₹500 (50000 paise); balance denominator floored at 1 paise.",
+        "Apply g(x)=clip((x−1)·k_amt, 0, cap_amt) form for the amount term with versioned k_amt/cap_amt.",
+        "Guard against NaN/Inf explicitly (if math.IsNaN/IsInf → treat as max-anomalous or safe default per spec intent)."
+      ],
+      "tests": [
+        "New-account (zero history) input does not produce NaN/Inf and yields a bounded score.",
+        "AmountVsAverage of 1000x clips to the 25x ceiling.",
+        "BalanceImpact > 1 clips to 1."
+      ]
+    },
+    {
+      "id": "P5",
+      "title": "Transaction risk score — geo (impossible-travel), day-of-week, market-context terms",
+      "spec_ref": "§1.3",
+      "priority": "medium",
+      "self_contained": true,
+      "modify": "internal/domain/transaction/model.go (extend RiskSignal), heuristic.go (add w10–w12 branches)",
+      "create": "internal/domain/transaction/geo.go (Haversine helper) + tests",
+      "requirements": [
+        "Add RiskSignal fields: DistanceKm, HoursSinceLastTxn float64; Country, HomeCountry string; HasInternationalHistory bool; DowZScore float64; VolIndexPercentile float64.",
+        "geo_term: Haversine(lat1,lon1,lat2,lon2); impossible_travel if distance/hours > 900 km/h → 25; else 10 if country != home_country AND no international history; else 0.",
+        "dow_term = clip(5·max(0, z_dow − 1.5), 0, 10); require ≥4 same-weekday observations before trusting (else 0) — the caller supplies the z-score and observation count.",
+        "market_context_term = 8 if (AmountVsAverage > 3 AND vol_index_t > 90th-percentile) else 0.",
+        "All weights and thresholds (900 km/h, 1.5, 3, p90) from versioned config."
+      ],
+      "tests": [
+        "Two logged-in sessions 5000km apart within 1h → impossible-travel flag, geo_term 25.",
+        "First-ever international txn with no history → geo_term 10.",
+        "dow_term is 0 when fewer than 4 weekday observations."
+      ]
+    },
+    {
+      "id": "P6",
+      "title": "AML structuring/smurfing control",
+      "spec_ref": "§1.5",
+      "priority": "medium",
+      "self_contained": false,
+      "reason_not_contained": "Needs recent transaction history, so it lives in the service layer, not the pure heuristic.",
+      "modify": "internal/domain/platform/service.go (risk evaluation path)",
+      "requirements": [
+        "StructuringFlag(userID, window=24h): count(txns to NEW recipients) ≥ 3 AND Σamount > 0.9×SingleTxnStructuringBenchmark AND stdev(amounts) < 0.15×mean(amounts) (suspiciously uniform).",
+        "When flagged, force MEDIUM tier minimum regardless of per-transaction scores, with its own XAI reason ('several similarly-sized payments to new recipients in a short window').",
+        "Benchmark and thresholds from versioned config (PMLA-aligned)."
+      ],
+      "tests": [
+        "3 uniform payments to new recipients in 24h → forced MEDIUM.",
+        "3 payments with high variance in amounts → not flagged.",
+        "2 payments (below count threshold) → not flagged."
+      ]
+    },
+    {
+      "id": "P7",
+      "title": "P_high-proportional cooling-off and friction",
+      "spec_ref": "§1.4",
+      "priority": "medium",
+      "self_contained": true,
+      "modify": "internal/domain/platform/service_expansion.go (955), internal/domain/blockchain/ledger.go (289) — replace fixed 6h",
+      "requirements": [
+        "cooling_off_minutes(P_high) = base_cooloff_minutes × (1 + κ·(P_high − 0.70)), base = 240 min (4h per spec), κ ≈ 2, HIGH tier only.",
+        "override_friction_level = base_friction + λ·max(0, P_high − 0.70), λ > 0, HIGH tier only.",
+        "Thresholds/base/κ/λ from versioned config. Note current code uses a fixed 6h base that differs from the spec's 4h — align to spec base and make proportional.",
+        "Ensure VerifyCoolingOff and the middleware read the computed duration, not a constant."
+      ],
+      "tests": [
+        "P_high=0.70 → cooling-off == base (240 min).",
+        "P_high=0.95 → ≈ 240×1.5 = 360 min.",
+        "MEDIUM/LOW tier → no proportional escalation."
+      ]
+    },
+    {
+      "id": "P8",
+      "title": "Monte Carlo simulation — honesty envelope & goal probability",
+      "spec_ref": "§5.2, §5.4, §5.5",
+      "priority": "high",
+      "self_contained": true,
+      "modify": "internal/domain/platform/service.go RunSimulation + SimulationResult struct",
+      "requirements": [
+        "Compute GoalCompletionProbability = count(C_T ≥ C_target)/N using the already-sorted results; round to nearest 1% (no false precision like 73.482%).",
+        "Replace hardcoded GoalCompletionDeltaPct: 6.4 and keyword-based HealthScoreDelta with computed values.",
+        "Add Assumptions metadata to every result: {SimulationCount N, Mu, Sigma, Blend, HistoricalWindowYears, Disclaimer:'based on historical patterns, not a prediction or guarantee of future returns'} — maps to spec S22.5 disclaimer set.",
+        "Preferred: replace flat Normal(0.07,0.12) with bootstrap resampling from a historical returns slice (≥10y NSE/AMFI category history) — spec calls the Normal assumption less defensible given fat tails. If historical data unavailable, keep Normal but document it in Assumptions.blend.",
+        "Keep P10/P50/P90 fan-chart percentiles (already present)."
+      ],
+      "tests": [
+        "Probability is in [0,1] and rounded to whole percent.",
+        "Assumptions block is populated and disclaimer present.",
+        "Deterministic seed → reproducible percentiles for audit."
+      ]
+    },
+    {
+      "id": "P9",
+      "title": "Financial Health Score — fill undefined pillar functions + audit snapshot",
+      "spec_ref": "§2, §2.1, §2.2",
+      "priority": "medium",
+      "self_contained": true,
+      "modify": "internal/domain/healthscore/calculator.go (+ new inputs); add snapshot schema in repo layer",
+      "requirements": [
+        "CoefficientOfVariation(series) = std/max(mean, FLOOR) with small positive FLOOR (job-loss month → large CV, not crash).",
+        "IdleCashMonths penalty = clip(8·(IdleCashMonths−3), 0, 40), soft not binary.",
+        "TargetCorpusForAge(age, income): YearsToRetirement=max(60−age,0); RequiredAnnualIncomeAtRetirement=0.70·income·(1+inflation)^years; TargetCorpus=Required·AnnuityFactor(25, 0.03) where AnnuityFactor(n,r)=(1−(1+r)^-n)/r. Versioned config for 60/0.70/25/0.03.",
+        "score_LoanMix = 40 + 60·GoodDebtRatio where GoodDebtRatio=(HomeLoan+EducationLoan)/TotalDebt.",
+        "Cold-start (§2.1): if months_of_history < 3 → use onboarding proxy from snapshot data only, trend/consistency sub-terms default to neutral 50; display 'Preliminary — based on limited history' badge; no EWMA. For 3–6 months, EWMA over available months, renormalise denominator, do NOT pad missing months with zeros.",
+        "Persist FinancialHealthSnapshot{userID, snapshotMonth, computedAt, P1..P7, RawComposite 300-900, inputHash (sha256 of feature vector for reproducibility), modelVersion, dataCompleteness 0-1}. Surface dataCompleteness in XAI ('score 656, but 40% estimated')."
+      ],
+      "tests": [
+        "Same inputHash → identical RawComposite (reproducibility).",
+        "Zero-income month → LOW CashFlowReg via large CV, no crash/NaN.",
+        "months_of_history<3 → neutral-50 sub-terms + preliminary flag.",
+        "dataCompleteness reflects fraction of real vs. defaulted sub-metrics."
+      ]
+    },
+    {
+      "id": "P10",
+      "title": "Mule GNN structural features (fill patternScore fallback)",
+      "spec_ref": "§3",
+      "priority": "low",
+      "self_contained": true,
+      "modify": "internal/domain/fraud/gnn.go (patternBasedScore fallback)",
+      "requirements": [
+        "FanInRatio(v) = InDegree/max(OutDegree,1); FanOutBurstiness(v) = largest 24h outbound after large inbound / TotalInboundLast24h.",
+        "AccountAgeAtFirstLargeCredit < 24h flag (highest-precision new-mule signal).",
+        "ClusteringCoefficient(v) = 2·triangles/(deg·(deg−1)); LOW clustering among counterparties is mule-consistent.",
+        "CompositeStructuralScore(v) = sigmoid(a1·z(FanIn) + a2·z(FanOutBurst) + a3·1[age<24h] − a4·z(Clustering)); use as the non-hardcoded fallback for recipients with no path from any seed node, replacing the keyword/structural placeholder.",
+        "Coefficients a1..a4 from versioned config."
+      ],
+      "tests": [
+        "Funnel pattern (many senders, one recipient) → high FanInRatio → elevated score.",
+        "New account receiving large credit within 24h → flag set.",
+        "Normal clustered social graph → low structural score."
+      ]
+    },
+    {
+      "id": "P11",
+      "title": "Market Manipulation & Panic-Selling defence",
+      "spec_ref": "§6",
+      "priority": "low",
+      "self_contained": false,
+      "reason_not_contained": "Needs SMS-classifier output (Model 10) and SELL-order interception; new data dependencies.",
+      "requirements": [
+        "Trigger_TipToTrade: flagged SMS/email (AMBER/RED) in preceding ~72h referencing order.instrument AND instrument avg_daily_volume < LowLiquidityThreshold → elevate market_context_term + XAI reason. Large-cap filter avoids false flags.",
+        "Trigger_PanicSell: SELL AND amount > 0.25·TotalEquityPortfolioValue AND intraday index drawdown ≤ −3% → surface calm-down prompt reusing Model-13 deterministic hold-vs-sell projection (NOT new math).",
+        "COMPLIANCE: both are informational/protective only — must NEVER block/delay a SELL beyond the already-reviewed S9.4A.4 cooling-off. Calm-down prompt one-tap dismissible; dismissal not logged as evidence against the user."
+      ],
+      "tests": [
+        "SELL of 30% during −4% drawdown → calm-down prompt (dismissible), order still proceeds.",
+        "Spam SMS referencing a large-cap → not flagged (liquidity filter).",
+        "Prompt dismissal produces no adverse log entry."
+      ]
+    },
+    {
+      "id": "P12",
+      "title": "News / Disinformation Integrity Filter",
+      "spec_ref": "§7",
+      "priority": "low",
+      "self_contained": false,
+      "reason_not_contained": "Needs an article feed and source registry; replaces canned marketNews/marketTrends.",
+      "requirements": [
+        "Stage 1 — deterministic source whitelist (blockchain-anchored per S11A.6): admit only if source_domain ∈ ApprovedSourceWhitelist (BSE/NSE/RBI/SEBI + named versioned media list). Non-admitted articles are never shown. Whitelist changes require the multi-party consensus governance process, not a code change.",
+        "Stage 2 — DisinfoScore on whitelisted content only: w1·UrgencyLexiconDensity + w2·1[no attributable source in first 3 paragraphs] + w3·1[extreme/superlative density above outlet baseline] − w4·1[cites official filing]. Soft-flag 'review with caution' above calibrated threshold; NEVER hard-block a whitelisted source.",
+        "Weights and whitelist are versioned config."
+      ],
+      "tests": [
+        "Non-whitelisted domain → never returned.",
+        "Whitelisted opinion piece with urgency lexicon → soft 'review with caution', still shown.",
+        "Article citing an official RBI filing → score reduced."
+      ]
+    },
+    {
+      "id": "P13",
+      "title": "Versioned model parameters (cross-cutting)",
+      "spec_ref": "RBI model-risk / versioning notes throughout",
+      "priority": "high",
+      "self_contained": true,
+      "create": "internal/config/models.go",
+      "requirements": [
+        "Introduce a ModelParams struct with Version string and grouped fields: RiskTiers{Medium:40,High:70}, AmountTerm{K,Cap}, CoolingOff{BaseMinutes:240,Kappa:2,Lambda}, Geo{ImpossibleTravelKmh:900}, Simulation{Mu:0.07,Sigma:0.12,Blend,HistoricalYears}, Foreclosure{...}, HealthScore{RetirementAge:60,ReplacementRate:0.70,PostYears:25,RealReturn:0.03}, Structuring{Benchmark,MinCount:3}.",
+        "Load once at startup (env or embedded default), thread into domain constructors (RiskEngine, Calculator, debt/credit funcs).",
+        "Expose ModelParams.Version so it can be written into FinancialHealthSnapshot.modelVersion and simulation Assumptions.",
+        "Replace scattered magic literals (40/70, 6h, 0.08/0.015, 0.07/0.12) with reads from this struct."
+      ],
+      "tests": [
+        "Default params load and validate.",
+        "Overriding a threshold via env changes the scoring output.",
+        "Version string propagates into snapshot and simulation metadata."
+      ]
+    }
+  ],
+  "suggested_sequence": ["P13", "P1", "P2", "P4", "P3", "P8", "P9", "P5", "P6", "P7", "P10", "P11", "P12"],
+  "verification": [
+    "go build ./... && go vet ./... && gofmt -l . (expect empty) && golangci-lint run ./...",
+    "go test ./... passes including new table tests.",
+    "Each replaced endpoint returns computed numbers that change with inputs (no constants).",
+    "Foreclosure on a floating individual loan returns penalty 0 (compliance check).",
+    "No NaN/Inf reachable in risk scoring for zero-history inputs."
+  ],
+  "constraints": [
+    "Do not fake remediations or return placeholder numbers dressed as computed values.",
+    "Do not weaken existing auth, cooling-off, or compliance controls.",
+    "Do not rename client-facing JSON fields; only add.",
+    "Keep money in int64 paise; round float intermediates back to paise.",
+    "Line/handler references reflect current files — confirm before editing as code may have shifted."
+  ]
+}

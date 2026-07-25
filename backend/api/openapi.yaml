@@ -1,0 +1,62 @@
+openapi: 3.1.0
+info:
+  title: FINIX Backend API
+  version: 0.1.0
+  description: Initial scaffold for FINIX backend.
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      operationId: getHealth
+      responses:
+        "200":
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  service:
+                    type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+  /readyz:
+    get:
+      summary: Readiness probe
+      operationId: getReady
+      responses:
+        "200":
+          description: Service readiness status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  service:
+                    type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+  /v1/system/version:
+    get:
+      summary: Service version
+      operationId: getSystemVersion
+      responses:
+        "200":
+          description: Service version payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service:
+                    type: string
+                  version:
+                    type: string

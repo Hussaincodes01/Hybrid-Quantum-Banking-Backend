@@ -1,0 +1,253 @@
+{
+  "task": "Fix all issues identified in the FINIX Go backend review. Apply changes file-by-file, preserve existing behavior except where the fix explicitly changes it, keep code gofmt-clean, and run `gofmt -l .`, `go vet ./...`, `golangci-lint run ./...`, and `go test ./...` after each group. Do not introduce new dependencies without noting them.",
+  "context": {
+    "module": "FINIX/backend",
+    "root": "backend/",
+    "language": "Go (1.21+ required for log/slog and crypto/ecdh)",
+    "domain": "Banking / fintech backend — security correctness is paramount",
+    "toolchain_note": "gofmt/go vet/golangci-lint were NOT run during review (no Go toolchain in review env). Run them first to catch mechanical issues before applying manual fixes."
+  },
+  "conventions": {
+    "errors": "lowercase, no trailing punctuation; wrap underlying causes with fmt.Errorf(\"...: %w\", err); use errors.Is/errors.As at call sites",
+    "logging": "log/slog with static messages + key/value attrs; never log secrets, PII, tokens",
+    "concurrency": "single held critical section per mutation; never unlock-then-relock across a logical operation",
+    "types": "prefer `any` over `interface{}`; accept interfaces, return concrete structs",
+    "crypto": "always check crypto/rand errors; use subtle.ConstantTimeCompare for secret comparisons"
+  },
+  "must_fix": [
+    {
+      "id": "MF1",
+      "title": "Dilithium private key leaks via getter",
+      "file": "internal/domain/security/dilithium.go",
+      "lines": "130-134",
+      "problem": "GetCurrentKeyInfo() returns the full DilithiumKeypair including PrivateKey bytes; any handler serializing it leaks the signing private key to clients.",
+      "fix": "Introduce a redacted info struct (e.g. DilithiumKeyInfo) exposing only KeyID, Algorithm, and PublicKey, mirroring PQCManager.GetKeyInfo. Update callers.",
+      "verify": "Confirm no exported method or handler returns PrivateKey bytes; add a test asserting the JSON of the info struct contains no private key field."
+    },
+    {
+      "id": "MF2",
+      "title": "WebAuthn counter mutated through a stale pointer",
+      "file": "internal/domain/security/webauthn.go",
+      "lines": "115-141",
+      "problem": "VerifyChallenge captures reg=&pm.registrations[userID][i] under RLock, releases the lock, then re-acquires Lock and mutates reg. A concurrent Register (slice realloc) or RemoveRegistration (element shift) causes a lost update or a write to the wrong record.",
+      "fix": "Re-look up the registration by keyID inside the second (write) critical section and mutate it there; do not carry a pointer across an unlock.",
+      "verify": "Add a -race test that registers/removes concurrently while verifying."
+    },
+    {
+      "id": "MF3",
+      "title": "SIM binding proof code (VNNCode) serialized to client",
+      "file": "internal/domain/security/sim_binding.go",
+      "lines": "34",
+      "problem": "SIMBindingChallenge.VNNCode is tagged json:\"vnnCode\"; returning the struct hands the client the exact code it must later present, making VerifyBindingChallenge self-attesting.",
+      "fix": "Tag VNNCode as json:\"-\" (like Verified). Deliver the code out-of-band (SMS/push). Ensure CreateBindingChallenge does not return the code in any JSON response body.",
+      "verify": "Test that the marshaled challenge omits the code."
+    },
+    {
+      "id": "MF4",
+      "title": "eKYC accepts any well-formed XML as verified",
+      "file": "internal/domain/security/ekyc.go",
+      "lines": "54-103",
+      "problem": "VerifyAadhaarOfflineXML sets Verified:true for any parseable XML; UIDAI digital signature is never validated and share code only checked for non-emptiness.",
+      "fix": "If this is a mock, gate it behind a build tag (e.g. //go:build mock_ekyc) or force Verified:false with a clear MockOnly marker so it cannot be mistaken for real verification. If real, implement UIDAI signature validation.",
+      "verify": "Document mock status; add a test asserting a fabricated XML is NOT marked Verified in production build."
+    },
+    {
+      "id": "MF5",
+      "title": "CORS wildcard combined with credentials",
+      "file": "internal/api/router.go",
+      "lines": "908, 921",
+      "problem": "Origin check allows ao==\"*\" while Access-Control-Allow-Credentials:true is set; reflecting arbitrary origin with credentials defeats CORS protection.",
+      "fix": "Disallow \"*\" when credentials are enabled. Require an explicit allow-list; only echo Access-Control-Allow-Origin for origins in the list. Consider a config flag to disable credentialed CORS.",
+      "verify": "Test that a non-listed origin is rejected and that \"*\" is never emitted alongside Allow-Credentials:true."
+    }
+  ],
+  "should_fix": [
+    {
+      "id": "SF6",
+      "title": "No request body size limit",
+      "file": "internal/api/router.go",
+      "lines": "958 (decodeJSON)",
+      "problem": "json.NewDecoder(r.Body).Decode reads unbounded input; large bodies can exhaust memory.",
+      "fix": "Wrap body with http.MaxBytesReader(w, r.Body, maxBytes) before decoding; choose a sane max (e.g. 1MB) configurable via env."
+    },
+    {
+      "id": "SF7",
+      "title": "Rate-limiter map grows without bound",
+      "file": "internal/api/middleware/rate_limit.go",
+      "lines": "25",
+      "problem": "buckets keyed by client IP is never pruned; entries accumulate for process lifetime and are attacker-amplifiable.",
+      "fix": "Add a background sweeper (or lazy prune) removing windows older than `window`; or use a bounded/expiring cache. Ensure sweeper goroutine lifetime is clear/stoppable."
+    },
+    {
+      "id": "SF8",
+      "title": "Kyber rotation grace period is dead code",
+      "file": "internal/domain/security/pqc.go",
+      "lines": "117, 225-231, 300-308",
+      "problem": "Decapsulate only unpacks ServerKeypair; previousKey is stored/pruned but never consulted, so clients holding the prior public key get garbage shared secrets after RotateKey.",
+      "fix": "In Decapsulate, attempt current key then previousKey within the grace window; return a clear error if neither works."
+    },
+    {
+      "id": "SF9",
+      "title": "Unlock/relock TOCTOU on key rotation",
+      "file": "internal/domain/security/pqc.go, internal/domain/security/dilithium.go",
+      "lines": "pqc.go 250-261; dilithium.go 184-195",
+      "problem": "MaybeRotate drops the mutex to call RotateKey then re-locks; two concurrent callers can rotate twice back-to-back, evicting the genuinely-old key from `previous`.",
+      "fix": "Add an unexported rotateLocked() invoked under a single held lock; MaybeRotate checks and rotates without releasing the lock mid-operation."
+    },
+    {
+      "id": "SF10",
+      "title": "Non-constant-time secret comparison",
+      "file": "internal/domain/security/sim_binding.go",
+      "lines": "109, 161",
+      "problem": "VNN code (vnnCode != ch.VNNCode) and UBT (record.UBT != ubt) are secrets compared with != — a timing oracle.",
+      "fix": "Use subtle.ConstantTimeCompare (jwt.go:236 already does this correctly)."
+    },
+    {
+      "id": "SF11",
+      "title": "Discarded crypto/rand errors yield predictable IDs",
+      "file": "internal/domain/security/pqc.go, sim_binding.go, jwt.go",
+      "lines": "pqc.go 66,124,221; sim_binding.go 63,67,118; jwt.go 270 (randomHexJWT)",
+      "problem": "rand.Read return values ignored; on failure yields all-zero/colliding session IDs, key IDs, challenge IDs, VNN codes, UBTs, JTIs with no error surfaced.",
+      "fix": "Check the error and propagate (as dilithium.go:52 and webauthn.go:63 do). randomHexJWT must return an error rather than a constant zero string; propagate out of IssueToken."
+    },
+    {
+      "id": "SF12",
+      "title": "Revocation lookup fails open",
+      "file": "internal/domain/security/jwt.go",
+      "lines": "197-206",
+      "problem": "Postgres lookup error is swallowed and treated as not-revoked, contradicting the comment; a revoked token is accepted for up to TTL+grace during any DB blip after restart.",
+      "fix": "Decide policy explicitly. For a banking app prefer fail-closed on revocation lookup errors (or make it configurable). Align the comment with the actual behavior."
+    },
+    {
+      "id": "SF13",
+      "title": "Unsalted SHA-256 of Aadhaar number",
+      "file": "internal/domain/security/ekyc.go",
+      "lines": "160-165",
+      "problem": "hashUID is unsalted, unkeyed SHA-256 over a small number space — trivially brute-forced offline, defeating the never-store-raw-Aadhaar goal.",
+      "fix": "Use HMAC-SHA256 with a server-side secret key (or a peppered hash). Read key from env/secret store, never hardcode."
+    },
+    {
+      "id": "SF14",
+      "title": "Threat-response reports actions never performed",
+      "file": "internal/domain/security/threat_response.go",
+      "lines": "62, 99-152",
+      "problem": "BlockchainLogged, SessionsTerminated, EmailAlertSent etc. set true unconditionally though nothing is wired — false audit trail.",
+      "fix": "Either wire the actions (session store, mailer, ledger) or rename fields to *Requested to reflect intent, not completion."
+    },
+    {
+      "id": "SF15",
+      "title": "Interior pointer escapes the mutex",
+      "file": "internal/domain/security/sim_binding.go",
+      "lines": "203-213 (GetBinding)",
+      "problem": "GetBinding returns the live *SIMBindingRecord from inside the guarded map; callers race against ReverifySIM/RevokeBinding.",
+      "fix": "Return a copy of the record (as ListRegistrations does)."
+    },
+    {
+      "id": "SF16",
+      "title": "Unbounded challenge / attempt maps",
+      "file": "internal/domain/security/webauthn.go, sim_binding.go, threat_response.go",
+      "lines": "webauthn.go 82,112; sim_binding.go challenges map; threat_response.go credentialAttempts/rateLimitEscalated",
+      "problem": "Used challenges flagged Used=true but never deleted; abandoned challenges never swept; IP-keyed maps have attacker-controlled cardinality.",
+      "fix": "Add a TTL janitor / periodic sweep with a clear, stoppable goroutine lifetime; delete used/expired entries."
+    },
+    {
+      "id": "SF17",
+      "title": "dbPool threaded as interface{} with scattered type assertions",
+      "file": "internal/api/router.go, cmd/server/main.go",
+      "lines": "router.go 118,151; main.go 41,121,165,224",
+      "problem": "Empty-interface param inverts accept-interfaces/return-structs; *pgxpool.Pool asserted in multiple places — fragile.",
+      "fix": "Define a small consumer-side Store interface (Exec/QueryRow/Close as needed) and accept that; replace all interface{} with `any` in new code; centralize the single type assertion at the composition root."
+    },
+    {
+      "id": "SF18",
+      "title": "Package-level mutable allowedOrigins",
+      "file": "internal/api/router.go",
+      "lines": "945, 130",
+      "problem": "var allowedOrigins []string is package-level state appended inside NewRouter; two NewRouter calls (e.g. tests) accumulate origins across instances — latent bug and anti-pattern.",
+      "fix": "Move allowedOrigins into routerOptions/API instance state; build per-router."
+    },
+    {
+      "id": "SF19",
+      "title": "Ignored DB errors on revocation persistence path",
+      "file": "cmd/server/main.go",
+      "lines": "169, 178",
+      "problem": "_, _ = pool.Exec(...) and the lookup query silently drop DB errors on a security-relevant path.",
+      "fix": "Log at Warn with slog (no secrets); consider surfacing lookup errors to the fail-closed policy decision in SF12."
+    }
+  ],
+  "nits": [
+    {
+      "id": "N20",
+      "title": "auth.go else-if code ladder",
+      "file": "internal/api/middleware/auth.go",
+      "lines": "59-80",
+      "fix": "After early-returning on success, replace the else-if chain on `code` with a switch statement for readability."
+    },
+    {
+      "id": "N21",
+      "title": "Deprecated elliptic.Marshal/Unmarshal",
+      "file": "internal/domain/security/webauthn.go",
+      "lines": "207, 220",
+      "fix": "Replace with crypto/ecdh (ecdh.P256()) key encoding; deprecated since Go 1.21."
+    },
+    {
+      "id": "N22",
+      "title": "WebAuthn challenge burned before signature check",
+      "file": "internal/domain/security/webauthn.go",
+      "lines": "112",
+      "fix": "Only mark Used=true after a successful signature verification, so a malformed attempt or unknown keyID does not permanently consume the challenge."
+    },
+    {
+      "id": "N23",
+      "title": "EKYCVerificationResult.KIN declared but never populated",
+      "file": "internal/domain/security/ekyc.go",
+      "lines": "44, 90-100",
+      "fix": "Populate KIN or remove the field to avoid silently emitting an empty value."
+    },
+    {
+      "id": "N24",
+      "title": "Misleadingly named regex reused for PAN",
+      "file": "internal/domain/security/ekyc.go",
+      "lines": "19, 125",
+      "fix": "Rename aadhaarLast4Regex to a neutral name (e.g. fourDigitsRegex)."
+    },
+    {
+      "id": "N25",
+      "title": "ParseRole silently downgrades unknown roles",
+      "file": "internal/api/middleware/rbac.go",
+      "lines": "88",
+      "fix": "Log unrecognized role strings at Warn before defaulting to RoleCustomer."
+    },
+    {
+      "id": "N26",
+      "title": "Preallocate roles slice / prefer nil slice",
+      "file": "internal/api/middleware/rbac.go",
+      "lines": "68",
+      "fix": "Use make([]Role, 0, len(roleHierarchy)) since size is known."
+    },
+    {
+      "id": "N27",
+      "title": "Zero value not useful for manager types",
+      "file": "internal/domain/security/jwt.go",
+      "lines": "79, 85",
+      "fix": "Document that JWTManager (and peers holding maps) must be built via NewJWTManager; the nil-map zero value would panic."
+    },
+    {
+      "id": "N28",
+      "title": "Prefer any over interface{} and confirm gofmt",
+      "file": "repo-wide",
+      "lines": "various (jwt.go 37-43 error block alignment; main.go 165 stray indent)",
+      "fix": "Run gofmt -w . and goimports; replace interface{} with any in new/edited code."
+    }
+  ],
+  "acceptance_criteria": [
+    "gofmt -l . reports no files",
+    "go vet ./... is clean",
+    "golangci-lint run ./... passes (errcheck, staticcheck, govet-shadow enabled)",
+    "go test -race ./... passes, including new tests for MF1, MF2, MF3, MF4, MF5",
+    "No secret/PII/token is serialized to any HTTP response or log",
+    "All crypto/rand call sites check and propagate errors",
+    "No package-level mutable state introduced by request handling"
+  ],
+  "suggested_order": ["MF1","MF3","MF5","MF2","MF4","SF11","SF10","SF8","SF9","SF12","SF13","SF14","SF15","SF16","SF6","SF7","SF17","SF18","SF19","N20","N21","N22","N23","N24","N25","N26","N27","N28"]
+}

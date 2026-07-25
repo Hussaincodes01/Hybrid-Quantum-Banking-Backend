@@ -1,0 +1,19 @@
+# FINIX RAG - Qdrant Configuration
+
+service:
+  grpc_port: 6334
+  http_port: 6333
+
+storage:
+  storage_path: /qdrant/storage
+  snapshots_path: /qdrant/snapshots
+
+# Collection defaults
+collection:
+  optimizers_config:
+    default_segment_number: 2
+    indexing_threshold: 20000
+  hnsw_config:
+    m: 16
+    ef_construct: 100
+    full_scan_threshold: 10000

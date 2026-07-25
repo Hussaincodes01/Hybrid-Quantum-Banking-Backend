@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS chatbot_history;
+DROP TABLE IF EXISTS blockchain_events;
+DROP TABLE IF EXISTS notification_settings;
+DROP TABLE IF EXISTS beneficiary_links;
+DROP TABLE IF EXISTS challenges;
+DROP TABLE IF EXISTS consent_grants;
+DROP TABLE IF EXISTS freeze_states;
+DROP TABLE IF EXISTS audit_events;
+DROP TABLE IF EXISTS goals;
+DROP TABLE IF EXISTS transactions;
+DROP TABLE IF EXISTS accounts;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS users;

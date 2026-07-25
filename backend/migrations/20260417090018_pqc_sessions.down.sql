@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS pqc_sessions;
+DROP TABLE IF EXISTS pqc_keys;

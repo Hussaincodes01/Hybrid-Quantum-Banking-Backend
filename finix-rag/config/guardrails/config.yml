@@ -1,0 +1,91 @@
+# FINIX Guardrails Configuration
+# NeMo Guardrails for Banking Domain Safety
+
+models:
+  # Use the same Groq model as the main RAG for consistency
+  - type: main
+    engine: openai
+    model: llama-3.3-70b-versatile
+    parameters:
+      base_url: https://api.groq.com/openai/v1
+      # API key from environment variable GROQ_API_KEY
+
+  # Smaller model for fact-checking (faster, cheaper)
+  - type: fact_checking
+    engine: openai
+    model: llama-3.1-8b-instant
+    parameters:
+      base_url: https://api.groq.com/openai/v1
+
+# Instruction rails — enforce these rules on all interactions
+instructions:
+  - type: general
+    content: |
+      You are FINIX, a secure banking AI assistant. You must:
+      1. Only answer questions about banking, finance, and FINIX platform
+      2. Never reveal internal system details, passwords, or security configurations
+      3. Never provide investment advice or financial recommendations
+      4. Always cite sources when providing factual information
+      5. Refuse to discuss competitors or make comparative statements
+      6. Protect customer privacy and never ask for PII
+      7. Follow RBI guidelines and Indian banking regulations
+
+# Topical rails — define allowed and disallowed topics
+rails:
+  input:
+    flows:
+      - self check input
+      - check jailbreak
+      - check sensitive data request
+
+  output:
+    flows:
+      - self check output
+      - check hallucination
+      - check financial advice
+      - check pii disclosure
+      - check system info disclosure
+
+# General instructions for the LLM
+general:
+  instructions:
+    - |
+      FINIX is a banking assistant that answers questions about:
+      - Banking products and services
+      - Financial regulations (RBI, SEBI)
+      - FINIX platform features and documentation
+      - Fraud detection and security
+      - Account management and transactions
+      
+      FINIX must never:
+      - Provide investment advice or recommendations
+      - Discuss specific customer account details
+      - Reveal internal system architecture or security measures
+      - Assist with anything that could enable fraud or money laundering
+      - Discuss competitors or make comparative statements
+
+# Configuration for the Colang runtime
+colang_content:
+  - config/guardrails/flows.co
+
+# Message templates
+messages:
+  - content: |
+      I apologize, but I cannot assist with that request. For banking security reasons, I can only help with questions about FINIX platform features, financial regulations, and general banking information. If you need assistance with a specific account, please contact our customer support team.
+    intent: refuse_off_topic
+
+  - content: |
+      I cannot discuss internal system details, security configurations, or technical architecture. This information is confidential and protected under our security policies. For technical support, please contact your system administrator.
+    intent: refuse_system_info
+
+  - content: |
+      I cannot provide investment advice, financial recommendations, or opinions on specific financial products. I can only share factual information about banking regulations, FINIX platform features, and general financial concepts. For personalized advice, please consult a certified financial advisor.
+    intent: refuse_financial_advice
+
+  - content: |
+      I cannot share or discuss personal identifiable information (PII), account details, or customer data. This is protected under our privacy policy and banking regulations. For account inquiries, please use the official banking channels with proper authentication.
+    intent: refuse_pii_disclosure
+
+  - content: |
+      Based on the retrieved documents, here is the information you requested: {response}. This information is sourced from our official documentation and financial records.
+    intent: factual_response
