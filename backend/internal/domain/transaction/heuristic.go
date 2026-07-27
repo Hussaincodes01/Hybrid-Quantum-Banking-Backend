@@ -11,9 +11,14 @@ type HeuristicPredictor struct {
 	amt config.AmountTermParams
 }
 
+// featureCount is the length of the Model 1 feature vector, kept identical between
+// signalToFeatures (Go) and feature_cols in ml/train_fraud_model.py. Bump both in
+// lockstep — the ONNX model's input width is derived from this.
+const featureCount = 13
+
 func (h *HeuristicPredictor) Predict(features []float32) ([]float32, error) {
-	if len(features) < 9 {
-		return nil, fmt.Errorf("heuristic predictor requires 9 features, got %d", len(features))
+	if len(features) < featureCount {
+		return nil, fmt.Errorf("heuristic predictor requires %d features, got %d", featureCount, len(features))
 	}
 
 	sig := RiskSignal{
@@ -26,6 +31,10 @@ func (h *HeuristicPredictor) Predict(features []float32) ([]float32, error) {
 		RecipientGNNScore: float64(features[6]),
 		BehaviourDrift:    float64(features[7]),
 		SessionTrustScore: float64(features[8]),
+		GeoVelocityFlag:   features[9] > 0.5,
+		DayOfWeekZScore:   float64(features[10]),
+		MarketContextTerm: features[11] > 0.5,
+		StructuringFlag:   features[12] > 0.5,
 	}
 
 	assessment := h.assess(sig)
@@ -111,6 +120,29 @@ func (h *HeuristicPredictor) assess(sig RiskSignal) Assessment {
 		score += 8
 	}
 
+	// Spec §2.1.3 rule-based terms (w6/w7/w8/w12). These stay inert until the
+	// upstream data plumbing populates the fields (see SCHEMA_RECONCILIATION.md),
+	// so behaviour is unchanged for callers that don't yet set them.
+	if sig.GeoVelocityFlag {
+		score += 20
+		reasons = append(reasons, "location change implies physically impossible travel")
+	}
+	if sig.DayOfWeekZScore > 0 {
+		// Cap the day-of-week contribution at 10 points (§2.1.3 w7*10).
+		score += minFloat(10*sig.DayOfWeekZScore, 10)
+		if sig.DayOfWeekZScore >= 2 {
+			reasons = append(reasons, "spend is unusual for this day of week")
+		}
+	}
+	if sig.MarketContextTerm {
+		score += 8
+		reasons = append(reasons, "market is unusually volatile right now")
+	}
+	if sig.StructuringFlag {
+		score += 25
+		reasons = append(reasons, "several similarly-sized transfers in a short window (possible structuring)")
+	}
+
 	level := RiskLow
 	switch {
 	case score >= 70:
@@ -130,17 +162,24 @@ func (h *HeuristicPredictor) assess(sig RiskSignal) Assessment {
 	}
 }
 
+// signalToFeatures emits the feature vector in the EXACT order used by
+// feature_cols in ml/train_fraud_model.py. The two MUST stay identical, or the
+// ONNX model receives features in the wrong positions.
 func signalToFeatures(sig RiskSignal) []float32 {
 	return []float32{
-		float32(sig.AmountVsAverage),
-		boolToFloat(sig.IsNewRecipient),
-		float32(sig.HourOfDay),
-		float32(sig.FailedPINAttempts),
-		float32(sig.VelocityCount1Hr),
-		float32(sig.BalanceImpact),
-		float32(sig.RecipientGNNScore),
-		float32(sig.BehaviourDrift),
-		float32(sig.SessionTrustScore),
+		float32(sig.AmountVsAverage),       // 0
+		boolToFloat(sig.IsNewRecipient),    // 1
+		float32(sig.HourOfDay),             // 2
+		float32(sig.FailedPINAttempts),     // 3
+		float32(sig.VelocityCount1Hr),      // 4
+		float32(sig.BalanceImpact),         // 5
+		float32(sig.RecipientGNNScore),     // 6
+		float32(sig.BehaviourDrift),        // 7
+		float32(sig.SessionTrustScore),     // 8
+		boolToFloat(sig.GeoVelocityFlag),   // 9
+		float32(sig.DayOfWeekZScore),       // 10
+		boolToFloat(sig.MarketContextTerm), // 11
+		boolToFloat(sig.StructuringFlag),   // 12
 	}
 }
 

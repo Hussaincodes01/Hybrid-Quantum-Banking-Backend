@@ -43,6 +43,16 @@ def generate_synthetic_fraud_data(n: int, seed: int = SEED) -> pd.DataFrame:
     recipient_gnn_score = rng.uniform(0.0, 1.0, n)
     behaviour_drift = rng.uniform(0.0, 1.0, n)
     session_trust_score = rng.uniform(0.0, 1.0, n)
+    # --- Spec §2.1.1 features (schema parity with FINIX Dataset Features doc) ---
+    # geo_velocity_flag: derived from latitude/longitude + last_transaction_* + the
+    #   previous timestamp (Haversine/hours > 900 km/h). ~5% impossible-travel.
+    geo_velocity_flag = (rng.random(n) < 0.05).astype(np.float64)
+    # day_of_week_zscore: (spend(weekday) - benchmark_mean) / benchmark_std.
+    day_of_week_zscore = rng.normal(0.0, 1.0, n)
+    # market_context_term: realised vol > 2x 30-day avg (market_volatility_index). ~10%.
+    market_context_term = (rng.random(n) < 0.10).astype(np.float64)
+    # structuring_flag: 3+ uniform sub-benchmark transfers in 24h (new or same recipient). ~3%.
+    structuring_flag = (rng.random(n) < 0.03).astype(np.float64)
 
     # --- Label assignment using risk_engine.go heuristic logic ---
     scores = np.zeros(n, dtype=np.float64)
@@ -88,6 +98,12 @@ def generate_synthetic_fraud_data(n: int, seed: int = SEED) -> pd.DataFrame:
     scores[low_trust] += 15.0
     scores[mid_trust] += 8.0
 
+    # Spec §2.1.3 rule-based terms (mirror risk_engine.go assess()).
+    scores += 20.0 * geo_velocity_flag                                  # impossible travel
+    scores += np.minimum(10.0 * np.maximum(0.0, day_of_week_zscore), 10.0)  # day-of-week anomaly, capped at 10
+    scores += 8.0 * market_context_term                                 # elevated market volatility
+    scores += 25.0 * structuring_flag                                   # structuring/smurfing
+
     # Cap at 100
     scores = np.minimum(scores, 100.0)
 
@@ -107,6 +123,12 @@ def generate_synthetic_fraud_data(n: int, seed: int = SEED) -> pd.DataFrame:
             "recipient_gnn_score": recipient_gnn_score,
             "behaviour_drift": behaviour_drift,
             "session_trust_score": session_trust_score,
+            # Column order below MUST match signalToFeatures() indices 9-12 in
+            # risk_engine.go / heuristic.go, or ONNX inference misaligns features.
+            "geo_velocity_flag": geo_velocity_flag,
+            "day_of_week_zscore": day_of_week_zscore,
+            "market_context_term": market_context_term,
+            "structuring_flag": structuring_flag,
             "fraud_label": labels,
         }
     )

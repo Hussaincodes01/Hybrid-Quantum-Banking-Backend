@@ -16,6 +16,14 @@ const (
 	RiskHigh   RiskLevel = "high"
 )
 
+// RiskSignal is Model 1's feature vector (FINIX_Srishti §2.1). The first nine
+// fields are the original signals; the last four bring the struct to parity with
+// the spec's 12-feature RiskSignal_vector and the master relational dataset
+// (api-docs/"FINIX Dataset Features"). HourOfDay is retained as an implementation
+// extra (the dataset carries hour_of_day; the unusual-hour term supplements
+// DayOfWeekZScore). The four new fields default to spec-valid neutral values until
+// the upstream data plumbing (geo history, market-volatility feed, 24h recipient
+// counts) is wired to populate them — see docs/SCHEMA_RECONCILIATION.md.
 type RiskSignal struct {
 	AmountVsAverage   float64 `json:"amountVsAverage"`
 	IsNewRecipient    bool    `json:"isNewRecipient"`
@@ -26,6 +34,12 @@ type RiskSignal struct {
 	RecipientGNNScore float64 `json:"recipientGnnScore"`
 	BehaviourDrift    float64 `json:"behaviourDrift"`
 	SessionTrustScore float64 `json:"sessionTrustScore"`
+
+	// Spec §2.1.1 terms — added for schema parity with the canonical dataset.
+	GeoVelocityFlag   bool    `json:"geoVelocityFlag"`   // impossible travel: Haversine/hours > 900 km/h
+	DayOfWeekZScore   float64 `json:"dayOfWeekZScore"`   // 0 when < 4 same-weekday observations (excluded, §2.1.1)
+	MarketContextTerm bool    `json:"marketContextTerm"` // realised vol > 2× 30-day avg
+	StructuringFlag   bool    `json:"structuringFlag"`   // smurfing pattern (3+ uniform sub-benchmark txns/24h)
 }
 
 type Assessment struct {

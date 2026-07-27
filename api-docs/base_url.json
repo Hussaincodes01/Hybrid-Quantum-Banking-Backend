@@ -1,0 +1,86 @@
+{
+  "server": {
+    "base_url": "http://localhost:8080",
+    "version": "0.2.0",
+    "api_prefix": "/v1"
+  },
+  "health_endpoints": {
+    "GET /healthz": {
+      "description": "Liveness probe",
+      "auth_required": false,
+      "response": {
+        "status": "ok",
+        "service": "FINIX-backend",
+        "version": "0.2.0",
+        "timestamp": "2026-01-01T00:00:00Z",
+        "components": {
+          "postgres": "connected|not_configured",
+          "pqc": "available|unavailable",
+          "dilithium": "available|unavailable"
+        }
+      }
+    },
+    "GET /readyz": {
+      "description": "Readiness probe",
+      "auth_required": false,
+      "response": {
+        "status": "ready",
+        "service": "FINIX-backend",
+        "version": "0.2.0",
+        "timestamp": "2026-01-01T00:00:00Z"
+      }
+    },
+    "GET /v1/system/version": {
+      "description": "Service version",
+      "auth_required": false,
+      "response": {
+        "service": "FINIX-backend",
+        "version": "0.2.0"
+      }
+    },
+    "GET /v1/system/health-deep": {
+      "description": "Deep health check with component details",
+      "auth_required": false,
+      "response": {
+        "service": "FINIX-backend",
+        "version": "0.2.0",
+        "uptime": "2026-01-01T00:00:00Z",
+        "postgres": "connected",
+        "pqc": "key_age=1h",
+        "dilithium": "key_age=1h"
+      }
+    },
+    "GET /v1/system/metrics": {
+      "description": "Prometheus-format metrics",
+      "auth_required": false,
+      "content_type": "text/plain"
+    },
+    "GET /v1/system/openapi.json": {
+      "description": "OpenAPI spec (inline)",
+      "auth_required": false
+    }
+  },
+  "cors": {
+    "allowed_headers": [
+      "Authorization",
+      "Content-Type",
+      "Idempotency-Key",
+      "X-Internal-Token",
+      "X-Admin-Token",
+      "X-Biometric-Challenge-Id",
+      "X-Biometric-Challenge",
+      "X-Device-Fingerprint",
+      "X-Device-Trusted"
+    ],
+    "allowed_methods": ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    "max_age": 300,
+    "credentials": true
+  },
+  "security_headers": {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "1; mode=block",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+    "Cache-Control": "no-store"
+  }
+}
