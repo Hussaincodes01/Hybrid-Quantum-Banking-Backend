@@ -55,6 +55,7 @@ finix-rag/venv/
 # DEPENDENCIES
 # ==========================================
 backend/vendor/
+chaincode/finix/vendor/
 node_modules/
 
 # ==========================================
