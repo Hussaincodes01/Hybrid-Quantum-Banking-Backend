@@ -1,0 +1,165 @@
+FINIX Mule Account Detection (Graph Neural Network) Dataset Specification v2.0 (FINAL)
+1. Objective
+Develop a Graph Neural Network (GraphSAGE) to identify Mule Accounts by learning transactional relationships between bank accounts. The model outputs RecipientGNNScore (0–1), which is used by the Transaction Risk Score model.
+2. Dataset Characteristics
+Property
+Specification
+Task
+Node Classification
+Graph Type
+Directed Dynamic Graph
+Node
+Bank Account
+Edge
+Financial Transaction
+Target
+is_mule_account
+Output
+RecipientGNNScore
+Time-aware
+Yes
+Noise
+Yes
+Synthetic Fraud Patterns
+Yes
+3. Node Features
+Feature
+Type
+Description
+account_id
+String
+Unique Account ID
+user_id
+String
+Owner ID
+account_type
+Category
+Savings/Current/Salary/Business
+account_age_days
+Integer
+Days since account opening
+current_balance
+Float
+Current balance
+avg_monthly_balance
+Float
+Average monthly balance
+monthly_income
+Float
+Declared income
+occupation
+Category
+Customer occupation
+kyc_status
+Boolean
+KYC completed
+account_status
+Category
+Active/Dormant/Frozen
+home_city
+Category
+Registered city
+home_state
+Category
+Registered state
+home_country
+Category
+Registered country
+4. Edge Features
+Feature
+Type
+Description
+transaction_id
+String
+Unique Transaction ID
+sender_account_id
+String
+Source Node
+receiver_account_id
+String
+Destination Node
+transaction_amount
+Float
+Transaction Amount
+transaction_timestamp
+Datetime
+Transaction Time
+payment_channel
+Category
+UPI/IMPS/NEFT/RTGS/Card
+transaction_type
+Category
+P2P/P2M/Bill/Investment
+merchant_category
+Category
+Merchant Category
+transaction_status
+Category
+Success/Failed
+latitude
+Float
+Sender Latitude
+longitude
+Float
+Sender Longitude
+city
+Category
+Sender City
+device_id
+String
+Device Used
+session_id
+String
+Session Used
+receiver_is_new_beneficiary
+Boolean
+New beneficiary flag
+5. Computed Graph Features (Not Raw Dataset)
+In Degree
+Out Degree
+Total Degree
+Fan-In Ratio
+Fan-Out Ratio
+PageRank
+Betweenness Centrality
+Clustering Coefficient
+Community ID
+2-Hop Neighbours
+3-Hop Neighbours
+6. Target Label
+is_mule_account0 = Normal1 = MuleRecommended mule ratio: 1%–3%
+7. Mule Behaviour Patterns
+Collection Account – receives from many unrelated accounts and rapidly forwards funds.
+Pass-through Account – incoming amount approximately equals outgoing amount.
+Structuring – many similarly-sized transfers to multiple counterparties.
+Dormant Account Activation – long inactivity followed by burst activity.
+Circular Money Movement – A → B → C → A.
+Layering – funds pass through multiple intermediary accounts.
+8. Noise Injection
+1% Missing Merchant Category
+2% GPS Drift
+2% Timestamp Jitter (±5 sec)
+1% Missing Device ID
+1% Missing Session ID
+3% Transaction Amount Variation
+9. Recommended Dataset Size
+Entity
+Size
+Users
+100,000
+Accounts
+120,000–150,000
+Transactions
+1,000,000
+Mule Accounts
+1–3%
+10. Graph Construction Rules
+Node = AccountEdge = TransactionEach successful transaction creates one directed edge from sender to receiver. Preserve timestamps for temporal graph analysis.
+11. Features NOT to Generate
+RecipientGNNScore
+Node Embeddings
+PageRank Score
+Community Labels
+Fan-In Ratio
+Fan-Out Ratio
+Graph Centrality Measures

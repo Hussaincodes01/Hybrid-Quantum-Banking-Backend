@@ -22,20 +22,20 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	apimw "FINIX/backend/internal/api/middleware"
-	"FINIX/backend/internal/infra/ai"
 	"FINIX/backend/internal/config"
 	"FINIX/backend/internal/domain/blockchain"
 	"FINIX/backend/internal/domain/platform"
 	"FINIX/backend/internal/domain/security"
+	"FINIX/backend/internal/infra/ai"
 )
 
 type API struct {
-	svc       *platform.Service
-	pqc       *security.PQCManager
-	dilithium *security.DilithiumManager
-	flow      *flowTracker
-	aiml      *aimlProxy    // staged proxy of LLM/AIML routes to the Python AI ecosystem
-	ragClient *ai.RagClient // Python FINIX RAG service client
+	svc         *platform.Service
+	pqc         *security.PQCManager
+	dilithium   *security.DilithiumManager
+	flow        *flowTracker
+	aiml        *aimlProxy    // staged proxy of LLM/AIML routes to the Python AI ecosystem
+	ragClient   *ai.RagClient // Python FINIX RAG service client
 	redisClient *redis.Client // Redis client for outbox publishing
 }
 
@@ -117,6 +117,7 @@ func WithRedisClient(c *redis.Client) RouterOption {
 func WithOutboxPublisher(publisher func(*platform.OutboxEvent) error) RouterOption {
 	return func(o *routerOptions) { o.outboxPublisher = publisher }
 }
+
 // structured-verify contract. Returns nil when no JWT manager is injected, so
 // the middleware falls back to opaque-token authentication (unit tests).
 func jwtVerifier(svc *platform.Service) apimw.JWTVerify {
@@ -270,12 +271,12 @@ func NewRouter(dbPool any, opts ...RouterOption) http.Handler {
 
 	tracker := newFlowTracker(300)
 	api := &API{
-		svc:       svc,
-		pqc:       pqcManager,
-		dilithium: dilithiumMgr,
-		flow:      tracker,
-		aiml:      newAIMLProxy(),
-		ragClient: options.ragClient,
+		svc:         svc,
+		pqc:         pqcManager,
+		dilithium:   dilithiumMgr,
+		flow:        tracker,
+		aiml:        newAIMLProxy(),
+		ragClient:   options.ragClient,
 		redisClient: options.redisClient,
 	}
 	if api.aiml.enabled {
@@ -2908,11 +2909,11 @@ func (api *API) validateRisk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"applied":     resp.Applied,
-		"tx_id":       req.TxID,
-		"new_status":  resp.NewStatus,
-		"old_status":  resp.OldStatus,
-		"message":     "Risk validation applied successfully",
+		"applied":    resp.Applied,
+		"tx_id":      req.TxID,
+		"new_status": resp.NewStatus,
+		"old_status": resp.OldStatus,
+		"message":    "Risk validation applied successfully",
 	})
 }
 

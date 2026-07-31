@@ -431,6 +431,42 @@ func (fg *FraudGraph) pruneOldNodes() {
 	}
 }
 
+// Softmax converts a slice of raw logits into a probability distribution that
+// sums to 1. It is numerically stabilised by subtracting the max logit before
+// exponentiating (prevents overflow on large logits).
+//
+// The mule-detection ONNX model (MuleAccountDetection.onnx) emits a raw
+// per-node logits tensor of shape [num_nodes, 2] — NOT probabilities. The
+// consumer must apply Softmax per row and take P(mule) = row[1] to obtain the
+// RecipientGNNScore in [0,1] that feeds the transaction-risk model (see
+// MODEL_IO_CONTRACT.md, two-stage pipeline). This helper lives here, alongside
+// the hand-written GNN it mirrors, so both graph-risk paths share one softmax.
+func Softmax(logits []float32) []float32 {
+	if len(logits) == 0 {
+		return nil
+	}
+	maxLogit := logits[0]
+	for _, v := range logits[1:] {
+		if v > maxLogit {
+			maxLogit = v
+		}
+	}
+	out := make([]float32, len(logits))
+	var sum float64
+	for i, v := range logits {
+		e := math.Exp(float64(v - maxLogit))
+		out[i] = float32(e)
+		sum += e
+	}
+	if sum == 0 {
+		return out
+	}
+	for i := range out {
+		out[i] = float32(float64(out[i]) / sum)
+	}
+	return out
+}
+
 // GetStats returns statistics about the fraud graph.
 func (fg *FraudGraph) GetStats() map[string]any {
 	fg.mu.RLock()

@@ -83,7 +83,11 @@ type GroqConfig struct {
 }
 
 type ModelsConfig struct {
+	// RiskModelPath is the transaction-risk ONNX classifier.
+	// MuleModelPath is the mule-account GNN whose RecipientGNNScore
+	// feeds the risk model — see MODEL_IO_CONTRACT.md.
 	RiskModelPath string
+	MuleModelPath string
 }
 
 // AIConfig configures the AI ecosystem integration (Python FINIX RAG service).
@@ -126,7 +130,8 @@ func Load() *Config {
 			Model:   envOrDefault("GROQ_MODEL", "llama3-8b-8192"),
 		},
 		Models: ModelsConfig{
-			RiskModelPath: envOrDefault("FINIX_RISK_MODEL_PATH", "../../models/security/fraud_label/v1/model.onnx"),
+			RiskModelPath: envOrDefault("FINIX_RISK_MODEL_PATH", "../../models/transaction_risk_model.onnx"),
+			MuleModelPath: envOrDefault("FINIX_MULE_MODEL_PATH", "../../models/MuleAccountDetection.onnx"),
 		},
 		AI: AIConfig{
 			Provider:      envOrDefault("AI_PROVIDER", "local"),

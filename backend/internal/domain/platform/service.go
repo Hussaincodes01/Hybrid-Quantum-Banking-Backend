@@ -1700,6 +1700,17 @@ func (s *Service) InitiateTransaction(userID, idempotencyKey string, req Initiat
 	}
 
 	_, seenRecipient := s.beneficiaries[userID][strings.ToLower(req.Recipient)]
+	// Extended raw inputs for the 32-feature transaction_risk_model (unit-safe
+	// subset the backend already holds; unset fields mean-default at inference).
+	var acctBalanceRupees, acctAgeDays float64
+	var acctType string
+	if accts := s.accounts[userID]; len(accts) > 0 {
+		acctBalanceRupees = float64(accts[0].BalancePaise) / 100
+		acctType = accts[0].AccountType
+	}
+	if u := s.users[userID]; u != nil {
+		acctAgeDays = now.Sub(u.CreatedAt).Hours() / 24
+	}
 	signal := transaction.RiskSignal{
 		AmountVsAverage:   float64(req.AmountPaise) / avgAmount,
 		IsNewRecipient:    !seenRecipient,
@@ -1710,6 +1721,13 @@ func (s *Service) InitiateTransaction(userID, idempotencyKey string, req Initiat
 		RecipientGNNScore: s.fraudGraph.GetRiskScore(req.Recipient),
 		BehaviourDrift:    clamp(req.BehaviourDrift, 0, 1),
 		SessionTrustScore: clamp(req.SessionTrustScore, 0, 1),
+
+		TransactionAmount: float64(req.AmountPaise) / 100,
+		CurrentBalance:    acctBalanceRupees,
+		AccountAgeDays:    int(acctAgeDays),
+		AccountType:       acctType,
+		PaymentChannel:    req.Channel,
+		Currency:          "INR",
 	}
 
 	assessment := s.riskEngine.Evaluate(signal)
