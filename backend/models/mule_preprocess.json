@@ -1,0 +1,166 @@
+{
+  "model": "MuleAccountDetection",
+  "input_tensors": {
+    "node_features": "float32 [n,20]",
+    "edge_index": "int64 [2,e]"
+  },
+  "output": "logits [n,2]; softmax(logits)[:,1] = P(mule) = recipient_gnn_score",
+  "feature_order": [
+    "account_type",
+    "account_age_days",
+    "current_balance",
+    "avg_monthly_balance",
+    "monthly_income",
+    "occupation",
+    "kyc_status",
+    "account_status",
+    "home_city",
+    "home_state",
+    "home_country",
+    "in_degree",
+    "out_degree",
+    "total_degree",
+    "unique_senders",
+    "unique_receivers",
+    "total_incoming_amount",
+    "avg_incoming_amount",
+    "total_outgoing_amount",
+    "avg_outgoing_amount"
+  ],
+  "scaled_columns": [
+    "account_type",
+    "account_age_days",
+    "current_balance",
+    "avg_monthly_balance",
+    "monthly_income",
+    "occupation",
+    "kyc_status",
+    "account_status",
+    "home_city",
+    "home_state",
+    "home_country",
+    "in_degree",
+    "out_degree",
+    "total_degree",
+    "unique_senders",
+    "unique_receivers",
+    "total_incoming_amount",
+    "avg_incoming_amount",
+    "total_outgoing_amount",
+    "avg_outgoing_amount"
+  ],
+  "scaler": {
+    "type": "standard",
+    "mean": [
+      1.5029269866633888,
+      1840.4821461495912,
+      82243.9732883658,
+      79118.23244914266,
+      60471.8628925696,
+      3.2354879847581586,
+      1.9104464999078115,
+      0.07999661975293466,
+      4.50119076885256,
+      3.696446131153586,
+      0.0,
+      7.682379693933993,
+      7.682379693933993,
+      15.364759387867986,
+      7.682195316821338,
+      7.682195316821338,
+      19038.706113714583,
+      2476.6336607479507,
+      19038.70611371458,
+      2474.7825809030846
+    ],
+    "scale": [
+      1.1183668029582592,
+      1044.3457190535632,
+      105838.56075139738,
+      101902.85467413552,
+      60403.68441933995,
+      1.6649806278399628,
+      0.401477998625248,
+      0.3364632376396606,
+      2.8718825242200885,
+      2.190659272015079,
+      1.0,
+      2.7793283114962652,
+      2.7719299885171904,
+      3.928736486298396,
+      2.7791662603254013,
+      2.7718894548845867,
+      11375.132910607252,
+      1288.8929642257256,
+      11361.712418166238,
+      1264.426692298961
+    ]
+  },
+  "categoricals": {
+    "account_type": [
+      "Business",
+      "Current",
+      "Salary",
+      "Savings"
+    ],
+    "occupation": [
+      "Business Owner",
+      "Government Employee",
+      "Homemaker",
+      "Retired",
+      "Salaried Employee",
+      "Self-employed",
+      "Student"
+    ],
+    "kyc_status": [
+      "Pending",
+      "Rejected",
+      "Verified"
+    ],
+    "account_status": [
+      "Active",
+      "Dormant",
+      "Frozen"
+    ],
+    "home_city": [
+      "Ahmedabad",
+      "Bengaluru",
+      "Chennai",
+      "Delhi",
+      "Hyderabad",
+      "Kolkata",
+      "Lucknow",
+      "Mumbai",
+      "Noida",
+      "Pune"
+    ],
+    "home_state": [
+      "Delhi",
+      "Gujarat",
+      "Karnataka",
+      "Maharashtra",
+      "Tamil Nadu",
+      "Telangana",
+      "Uttar Pradesh",
+      "West Bengal"
+    ],
+    "home_country": [
+      "India"
+    ]
+  },
+  "graph_construction": {
+    "node_index": "row order of nodes_df['account_id'] (account_id -> 0..N-1)",
+    "edge": "one DIRECTED edge sender_account_id -> receiver_account_id per transaction row",
+    "graph_features_computed_before_scaling": [
+      "in_degree",
+      "out_degree",
+      "total_degree",
+      "unique_senders",
+      "unique_receivers",
+      "total_incoming_amount",
+      "avg_incoming_amount",
+      "total_outgoing_amount",
+      "avg_outgoing_amount"
+    ]
+  }
+}
