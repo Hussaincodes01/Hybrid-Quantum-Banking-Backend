@@ -11,7 +11,6 @@ import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix
 from xgboost import XGBClassifier
 from skl2onnx import convert_sklearn
@@ -21,7 +20,7 @@ import joblib
 SEED = 42
 N_SAMPLES = 50_000
 MODEL_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "models", "security", "fraud_label", "v1"
+    os.path.dirname(__file__), "..", "models", "security", "transaction_risk_score", "v1"
 )
 
 
@@ -155,12 +154,12 @@ def main():
     )
     print(f"\nTrain: {X_train.shape[0]:,}  Test: {X_test.shape[0]:,}")
 
-    # 3. Scale features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-
-    # 4. Train XGBoost
+    # 3. Train XGBoost on RAW features (no scaling).
+    # XGBoost is a tree model (scale-invariant); the Go inference path
+    # (internal/domain/transaction/onnx_predictor.go) feeds raw signalToFeatures
+    # with NO scaler. Training on raw keeps train-time and serve-time inputs
+    # identical — scaling here previously misaligned served predictions vs. the Go
+    # feature vector.
     print("\nTraining XGBoost classifier...")
     model = XGBClassifier(
         n_estimators=300,
@@ -175,14 +174,14 @@ def main():
         use_label_encoder=False,
     )
     model.fit(
-        X_train_scaled,
+        X_train,
         y_train,
-        eval_set=[(X_test_scaled, y_test)],
+        eval_set=[(X_test, y_test)],
         verbose=50,
     )
 
     # 5. Evaluate
-    y_pred = model.predict(X_test_scaled)
+    y_pred = model.predict(X_test)
     print("\n--- Classification Report ---")
     print(
         classification_report(
@@ -207,7 +206,7 @@ def main():
     # 7. Save preprocessor
     preprocess_path = os.path.join(MODEL_DIR, "preprocess.joblib")
     joblib.dump(
-        {"scaler": scaler, "feature_columns": feature_cols}, preprocess_path
+        {"feature_columns": feature_cols, "scaling": "none"}, preprocess_path
     )
     print(f"Preprocessor saved: {preprocess_path}")
 
@@ -215,7 +214,7 @@ def main():
     import onnxruntime as ort
 
     sess = ort.InferenceSession(onnx_path)
-    test_input = X_test_scaled[:5].astype(np.float32)
+    test_input = X_test[:5].astype(np.float32)
     ort_output = sess.run(None, {"float_input": test_input})
     print(f"\nONNX inference test (first 5 samples):")
     print(f"  Predicted labels: {np.argmax(ort_output[0], axis=1).tolist()}")

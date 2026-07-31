@@ -28,8 +28,11 @@ type ModelParams struct {
 	CoolingOff  CoolingOffParams  `json:"coolingOff"`
 	Geo         GeoParams         `json:"geo"`
 	Simulation  SimulationParams  `json:"simulation"`
-	Foreclosure ForeclosureParams `json:"foreclosure"`
-	HealthScore HealthScoreParams `json:"healthScore"`
+	// ColdStartMonths gates ONNX inference: accounts younger than this fall back
+	// to the heuristic (see transaction/risk_engine.go ColdStart, MODEL_IO_CONTRACT.md).
+	ColdStartMonths int               `json:"coldStartMonths"`
+	Foreclosure     ForeclosureParams `json:"foreclosure"`
+	HealthScore     HealthScoreParams `json:"healthScore"`
 	Structuring StructuringParams `json:"structuring"`
 	Credit      CreditParams      `json:"credit"`
 	Debt        DebtParams        `json:"debt"`
@@ -153,6 +156,7 @@ func Default() ModelParams {
 			RetirementAge: 60, ReplacementRate: 0.70, PostYears: 25, RealReturn: 0.03,
 			Inflation: 0.05, CVFloor: 0.01, IdleCashFreeMonths: 3,
 		},
+		ColdStartMonths: 6,
 		Structuring: StructuringParams{
 			BenchmarkPaise: 100000000, MinCount: 3, WindowHours: 24, SumFraction: 0.9, UniformityStddev: 0.15,
 		},
@@ -199,6 +203,10 @@ func LoadModelParams() ModelParams {
 	}
 	if v, ok := modelEnvFloat("FINIX_EXPECTED_INVESTMENT_RETURN"); ok {
 		p.Foreclosure.ExpectedInvestmentReturn = v
+		overridden = true
+	}
+	if v, ok := modelEnvInt("FINIX_COLD_START_MONTHS"); ok {
+		p.ColdStartMonths = v
 		overridden = true
 	}
 

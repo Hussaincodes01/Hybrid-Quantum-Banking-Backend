@@ -11,14 +11,9 @@ type HeuristicPredictor struct {
 	amt config.AmountTermParams
 }
 
-// featureCount is the length of the Model 1 feature vector, kept identical between
-// signalToFeatures (Go) and feature_cols in ml/train_fraud_model.py. Bump both in
-// lockstep — the ONNX model's input width is derived from this.
-const featureCount = 13
-
 func (h *HeuristicPredictor) Predict(features []float32) ([]float32, error) {
-	if len(features) < featureCount {
-		return nil, fmt.Errorf("heuristic predictor requires %d features, got %d", featureCount, len(features))
+	if len(features) < 9 {
+		return nil, fmt.Errorf("heuristic predictor requires 9 features, got %d", len(features))
 	}
 
 	sig := RiskSignal{
@@ -31,10 +26,6 @@ func (h *HeuristicPredictor) Predict(features []float32) ([]float32, error) {
 		RecipientGNNScore: float64(features[6]),
 		BehaviourDrift:    float64(features[7]),
 		SessionTrustScore: float64(features[8]),
-		GeoVelocityFlag:   features[9] > 0.5,
-		DayOfWeekZScore:   float64(features[10]),
-		MarketContextTerm: features[11] > 0.5,
-		StructuringFlag:   features[12] > 0.5,
 	}
 
 	assessment := h.assess(sig)
@@ -120,29 +111,6 @@ func (h *HeuristicPredictor) assess(sig RiskSignal) Assessment {
 		score += 8
 	}
 
-	// Spec §2.1.3 rule-based terms (w6/w7/w8/w12). These stay inert until the
-	// upstream data plumbing populates the fields (see SCHEMA_RECONCILIATION.md),
-	// so behaviour is unchanged for callers that don't yet set them.
-	if sig.GeoVelocityFlag {
-		score += 20
-		reasons = append(reasons, "location change implies physically impossible travel")
-	}
-	if sig.DayOfWeekZScore > 0 {
-		// Cap the day-of-week contribution at 10 points (§2.1.3 w7*10).
-		score += minFloat(10*sig.DayOfWeekZScore, 10)
-		if sig.DayOfWeekZScore >= 2 {
-			reasons = append(reasons, "spend is unusual for this day of week")
-		}
-	}
-	if sig.MarketContextTerm {
-		score += 8
-		reasons = append(reasons, "market is unusually volatile right now")
-	}
-	if sig.StructuringFlag {
-		score += 25
-		reasons = append(reasons, "several similarly-sized transfers in a short window (possible structuring)")
-	}
-
 	level := RiskLow
 	switch {
 	case score >= 70:
@@ -162,45 +130,35 @@ func (h *HeuristicPredictor) assess(sig RiskSignal) Assessment {
 	}
 }
 
-// signalToFeatures emits the feature vector in the EXACT order used by
-// feature_cols in ml/train_fraud_model.py. The two MUST stay identical, or the
-// ONNX model receives features in the wrong positions.
-func signalToFeatures(sig RiskSignal) []float32 {
-	return []float32{
-		float32(sig.AmountVsAverage),       // 0
-		boolToFloat(sig.IsNewRecipient),    // 1
-		float32(sig.HourOfDay),             // 2
-		float32(sig.FailedPINAttempts),     // 3
-		float32(sig.VelocityCount1Hr),      // 4
-		float32(sig.BalanceImpact),         // 5
-		float32(sig.RecipientGNNScore),     // 6
-		float32(sig.BehaviourDrift),        // 7
-		float32(sig.SessionTrustScore),     // 8
-		boolToFloat(sig.GeoVelocityFlag),   // 9
-		float32(sig.DayOfWeekZScore),       // 10
-		boolToFloat(sig.MarketContextTerm), // 11
-		boolToFloat(sig.StructuringFlag),   // 12
-	}
-}
-
+// assessmentFromProbs maps the transaction-risk model's binary output vector
+// [P(legit), P(fraud)] onto the app's low/medium/high assessment. The model is
+// a binary is_fraud classifier (opset ai.onnx.ml TreeEnsembleClassifier), so
+// probs has exactly 2 elements; index 1 is P(fraud). The earlier code indexed
+// probs[0..2] as low/medium/high, which silently misread a 2-class vector.
 func assessmentFromProbs(probs []float32, sig RiskSignal) Assessment {
-	low, medium, high := float64(probs[0]), float64(probs[1]), float64(probs[2])
+	// Defensive: callers gate on len(probs)==2, but guard anyway.
+	if len(probs) < 2 {
+		return Assessment{Level: RiskLow, Score: 0, Reason: "insufficient model output"}
+	}
 
-	score := medium*50 + high*90 + low*10
+	pFraud := float64(probs[1])
+	// Score is simply the fraud probability on a 0–100 scale so it stays
+	// comparable with the heuristic's 0–100 score.
+	score := pFraud * 100
 
 	var level RiskLevel
 	switch {
-	case high >= 0.7:
+	case pFraud >= fraudProbHighThreshold:
 		level = RiskHigh
-	case high >= 0.4 || medium >= 0.6:
+	case pFraud >= fraudProbMediumThreshold:
 		level = RiskMedium
 	default:
 		level = RiskLow
 	}
 
-	reasons := make([]string, 0, 2)
+	reasons := make([]string, 0, 1)
 	if level != RiskLow {
-		reasons = append(reasons, "ML model flagged elevated risk")
+		reasons = append(reasons, "ML model flagged elevated fraud probability")
 	} else {
 		reasons = append(reasons, "transaction aligns with your normal behavior")
 	}
@@ -212,9 +170,11 @@ func assessmentFromProbs(probs []float32, sig RiskSignal) Assessment {
 	}
 }
 
-func boolToFloat(b bool) float32 {
-	if b {
-		return 1.0
-	}
-	return 0.0
-}
+// Decision thresholds on P(fraud). These are placeholders pending the
+// training-time decision threshold in the supplied preprocessing artifact
+// (see MODEL_IO_CONTRACT.md) and should be promoted to auditable config once
+// the operating point is known.
+const (
+	fraudProbMediumThreshold = 0.40
+	fraudProbHighThreshold   = 0.70
+)

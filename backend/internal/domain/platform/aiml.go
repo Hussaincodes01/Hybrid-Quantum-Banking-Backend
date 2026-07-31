@@ -590,6 +590,17 @@ func (s *Service) IngestBankEvent(userID string, event BankTransactionEvent) (Re
 	}
 
 	_, seenRecipient := s.beneficiaries[userID][strings.ToLower(event.Counterparty)]
+	// Extended raw inputs for the 32-feature transaction_risk_model (unit-safe
+	// subset; unset fields mean-default at inference).
+	var acctBalanceRupees, acctAgeDays float64
+	var acctType string
+	if accts := s.accounts[userID]; len(accts) > 0 {
+		acctBalanceRupees = float64(accts[0].BalancePaise) / 100
+		acctType = accts[0].AccountType
+	}
+	if u := s.users[userID]; u != nil {
+		acctAgeDays = event.EventTimestamp.Sub(u.CreatedAt).Hours() / 24
+	}
 	signal := transaction.RiskSignal{
 		AmountVsAverage:   float64(event.AmountPaise) / avgAmount,
 		IsNewRecipient:    !seenRecipient,
@@ -600,6 +611,13 @@ func (s *Service) IngestBankEvent(userID string, event BankTransactionEvent) (Re
 		RecipientGNNScore: s.fraudGraph.GetRiskScore(event.Counterparty),
 		BehaviourDrift:    clamp(event.BehaviourDrift, 0, 1),
 		SessionTrustScore: clamp(event.DeviceTrustScore, 0, 1),
+
+		TransactionAmount: float64(event.AmountPaise) / 100,
+		CurrentBalance:    acctBalanceRupees,
+		AccountAgeDays:    int(acctAgeDays),
+		AccountType:       acctType,
+		PaymentChannel:    event.Channel,
+		Currency:          "INR",
 	}
 
 	assessment := s.riskEngine.Evaluate(signal)
