@@ -561,31 +561,35 @@ func (s *Service) SeedDemoUsers() error {
 			})
 		}
 
-		// Net worth = assets (balance + investments + insurance/20) - loan
-		// liabilities. Some seeds carry large home loans that dwarf the modest
-		// seeded balance, yielding a negative net worth. Top up the primary
-		// account balance so net worth matches the intended NetWorthLakhs.
-		// (Balance feeds only the net-worth aggregate; never displayed raw.)
+		// Top up the primary account balance so the net worth reported by
+		// /v1/portfolio/net-worth matches the intended NetWorthLakhs. Some seeds
+		// carry large home loans that dwarf the modest seeded balance, which would
+		// otherwise yield a negative net worth.
+		//
+		// IMPORTANT: this MUST mirror NetWorthSnapshot's asset definition exactly —
+		// it counts bank balances + investment current value as assets and loans as
+		// liabilities, and does NOT count insurance. Previously this top-up also
+		// credited insurance/20, so it under-funded the balance and the endpoint
+		// reported a net worth below the target (and negative for low-target,
+		// high-insurance users). Excluding insurance here makes the endpoint report
+		// exactly NetWorthLakhs.
 		{
 			targetNetWorthPaise := int64(su.NetWorthLakhs) * 100000 * 100
-			var nonCashAssets int64
+			var investmentValue int64
 			for _, inv := range s.investments[userID] {
-				nonCashAssets += inv.CurrentValuePaise
-			}
-			for _, pol := range s.insurance[userID] {
-				nonCashAssets += pol.SumAssuredPaise / 20
+				investmentValue += inv.CurrentValuePaise
 			}
 			var liabilities int64
 			for _, ln := range s.loans[userID] {
 				liabilities += ln.OutstandingPaise
 			}
-			neededBalance := targetNetWorthPaise + liabilities - nonCashAssets
+			// balance so that balance + investments - liabilities == target.
+			neededBalance := targetNetWorthPaise + liabilities - investmentValue
 			if neededBalance > s.accounts[userID][0].BalancePaise {
 				s.accounts[userID][0].BalancePaise = neededBalance
 			}
-			// Safety net: never let a seed user surface a negative net
-			// worth (large loans can outweigh the top-up above).
-			actualNW := s.accounts[userID][0].BalancePaise + nonCashAssets - liabilities
+			// Safety net: never surface a net worth below the target.
+			actualNW := s.accounts[userID][0].BalancePaise + investmentValue - liabilities
 			if actualNW < targetNetWorthPaise {
 				s.accounts[userID][0].BalancePaise += targetNetWorthPaise - actualNW
 			}

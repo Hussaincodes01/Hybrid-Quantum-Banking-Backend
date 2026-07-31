@@ -223,10 +223,14 @@ func main() {
 	// than faking success, proving the seam is wired).
 	routerOpts = append(routerOpts, buildProviderOptions(cfg)...)
 
-	handler := api.NewRouter(dbPool, routerOpts...)
-
-	// ── Redis + Outbox Worker ────────────────────────────────
-	// Wire Redis client
+	// ── Redis outbox publisher ───────────────────────────────
+	// Wire the Redis client and register it as the outbox publisher BEFORE
+	// building the router, so the single Service.startOutboxWorker publishes
+	// events to Redis Streams. Previously these options were appended to
+	// routerOpts AFTER NewRouter had already consumed the slice, so they were
+	// silently dropped and nothing published. There is now exactly one outbox
+	// worker (in the service); the router's duplicate poller — which leaked on
+	// context.Background().Done() — has been removed.
 	var redisClient *redis.Client
 	if cfg.Redis.URL != "" {
 		opt, err := redis.ParseURL(cfg.Redis.URL)
@@ -249,21 +253,20 @@ func main() {
 			cancel()
 		}
 	}
-
-	// Pass Redis client to router for outbox publishing
 	if redisClient != nil {
-		routerOpts = append(routerOpts, api.WithRedisClient(redisClient))
+		routerOpts = append(routerOpts,
+			api.WithRedisClient(redisClient),
+			api.WithOutboxPublisher(func(ev *platform.OutboxEvent) error {
+				return redisClient.XAdd(context.Background(), &redis.XAddArgs{
+					Stream: ev.Topic,
+					Values: map[string]interface{}{"payload": ev.Payload},
+				}).Err()
+			}),
+		)
+		slog.Info("outbox publisher wired to Redis Streams")
 	}
 
-	// Wire the outbox publisher to the service
-	if redisClient != nil {
-		routerOpts = append(routerOpts, api.WithOutboxPublisher(func(ev *platform.OutboxEvent) error {
-			return redisClient.XAdd(context.Background(), &redis.XAddArgs{
-				Stream: ev.Topic,
-				Values: map[string]interface{}{"payload": ev.Payload},
-			}).Err()
-		}))
-	}
+	handler := api.NewRouter(dbPool, routerOpts...)
 
 		server := &http.Server{
 		Addr:              cfg.Server.Addr,
@@ -274,29 +277,9 @@ func main() {
 		IdleTimeout:       cfg.Server.IdleTimeout,
 	}
 
-	// Shutdown context for background workers
+	// Shutdown context: SIGINT/SIGTERM triggers graceful HTTP shutdown below.
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	// ── Outbox Worker ────────────────────────────────────────
-	// Publishes outbox events to Redis Streams
-	if redisClient != nil {
-		go func() {
-			ticker := time.NewTicker(500 * time.Millisecond)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-shutdownCtx.Done():
-					slog.Info("outbox worker shutting down")
-					return
-				case <-ticker.C:
-					// The outbox is in the platform service, we need to access it
-					// This is a simplified approach - in production you'd expose the outbox
-					// via the API or use a different pattern
-				}
-			}
-		}()
-	}
 
 	go func() {
 		slog.Info("server starting", "addr", cfg.Server.Addr)

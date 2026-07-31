@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -288,9 +289,12 @@ func NewRouter(dbPool any, opts ...RouterOption) http.Handler {
 		slog.Info("FINIX RAG client attached to API", "baseURL", api.ragClient.BaseURL())
 	}
 	if api.redisClient != nil {
-		slog.Info("Redis client attached for outbox publishing")
-		// Start outbox worker in background
-		go api.startOutboxWorker()
+		// Outbox publishing is handled by the single Service.startOutboxWorker via
+		// the wired outboxPublisher (see WithOutboxPublisher / cmd/server/main.go).
+		// We deliberately do NOT start a second poller here: the previous one both
+		// leaked (it selected on context.Background().Done(), which never fires) and
+		// competed with the service worker for the same outbox.
+		slog.Info("Redis client attached; outbox is published by the service worker")
 	}
 	if dilithiumMgr != nil {
 		svc.SetDilithiumManager(dilithiumMgr)
@@ -1875,6 +1879,21 @@ func (api *API) syntheticBankEventStream(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, res)
 }
 
+// idempotencyKeyOrGenerate returns the client's Idempotency-Key header, or a
+// generated fallback UUID when the header is absent. This keeps the header
+// OPTIONAL: a request without it still gets a unique key and succeeds, instead
+// of being rejected with 400. Clients that want cross-retry deduplication must
+// send their own stable key.
+func idempotencyKeyOrGenerate(r *http.Request) string {
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		key = uuid.NewString()
+		slog.Debug("no Idempotency-Key header supplied; generated fallback",
+			"key", key, "path", r.URL.Path)
+	}
+	return key
+}
+
 func (api *API) initiateTransaction(w http.ResponseWriter, r *http.Request) {
 	uid, err := userIDFromRequest(r)
 	if err != nil {
@@ -1886,7 +1905,11 @@ func (api *API) initiateTransaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if err := ValidateTransactionRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	idempotencyKey := idempotencyKeyOrGenerate(r)
 	res, err := api.svc.InitiateTransaction(uid, idempotencyKey, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -2065,8 +2088,9 @@ func (api *API) contributeGoal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// L-9: carry the client's Idempotency-Key into the service so a retry can't
-	// double-debit the goal contribution.
-	req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	// double-debit the goal contribution. Optional: a fallback UUID is generated
+	// when the header is absent so the request still succeeds.
+	req.IdempotencyKey = idempotencyKeyOrGenerate(r)
 	res, err := api.svc.ContributeGoal(uid, goalID, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -2675,10 +2699,11 @@ func (api *API) registerExpandedAuthedRoutes(v1 chi.Router) {
 	v1.Get("/insights/nudge-log", api.expandedEndpoint("insights_nudge_log", true, false))
 	v1.Post("/aiml/behaviour/persona/contest", api.expandedEndpoint("aiml_behaviour_persona_contest", true, true))
 
-	v1.Get("/security/emergency-contacts", api.expandedEndpoint("security_emergency_contacts_list", true, false))
-	v1.Post("/security/emergency-contacts", api.expandedEndpoint("security_emergency_contacts_add", true, true))
-	v1.Delete("/security/emergency-contacts/{contactID}", api.expandedEndpoint("security_emergency_contacts_delete", true, false, "contactID"))
-	v1.Get("/security/tips", api.expandedEndpoint("security_tips", true, false))
+	// NOTE: /security/emergency-contacts (GET/POST/DELETE) and /security/tips are
+	// registered with their real handlers in NewRouter (see api.emergencyContacts,
+	// api.addEmergencyContact, api.deleteEmergencyContact, api.securityTips). They
+	// must NOT be re-registered here: chi's last-registration-wins would shadow the
+	// real handlers with these generic expandedEndpoint stubs.
 	v1.Get("/security/bank-contacts", api.expandedEndpoint("security_bank_contacts", true, false))
 	v1.Post("/security/report-fraud/forward-nccp", api.expandedEndpoint("security_forward_nccp", true, true))
 	v1.Post("/security/emergency-freeze/test", api.expandedEndpoint("security_emergency_freeze_test", true, false))
@@ -2915,38 +2940,6 @@ func (api *API) validateRisk(w http.ResponseWriter, r *http.Request) {
 		"old_status": resp.OldStatus,
 		"message":    "Risk validation applied successfully",
 	})
-}
-
-// startOutboxWorker starts a background worker that publishes outbox events to Redis Streams.
-func (api *API) startOutboxWorker() {
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-context.Background().Done(): // Will be cancelled when server shuts down
-			slog.Info("outbox worker shutting down")
-			return
-		case <-ticker.C:
-			if api.svc != nil && api.redisClient != nil {
-				events := api.svc.Outbox().Dequeue(100)
-				for _, ev := range events {
-					err := api.redisClient.XAdd(context.Background(), &redis.XAddArgs{
-						Stream: ev.Topic,
-						Values: map[string]interface{}{"payload": ev.Payload},
-					}).Err()
-					if err != nil {
-						slog.Warn("outbox publish failed, will retry", "event", ev.ID, "topic", ev.Topic, "error", err)
-						api.svc.Outbox().MarkFailed(ev.ID)
-						continue
-					}
-					api.svc.Outbox().MarkProcessed(ev.ID)
-				}
-				// Purge old processed events
-				api.svc.Outbox().Purge(6 * time.Hour)
-			}
-		}
-	}
 }
 
 // pqcEnforced reports whether authenticated routes must carry a valid

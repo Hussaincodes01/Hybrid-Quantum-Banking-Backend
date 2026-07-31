@@ -436,6 +436,13 @@ type InitiateTransactionRequest struct {
 	SessionTrustScore float64 `json:"sessionTrustScore"`
 	BehaviourDrift    float64 `json:"behaviourDrift"`
 	FailedPINAttempts int     `json:"failedPinAttempts"`
+
+	// Optional client-supplied metadata. These are commonly sent by the mobile
+	// app; they are accepted (so requests carrying them are not rejected even
+	// under strict JSON decoding) but are not required by the risk/debit logic.
+	BeneficiaryID string `json:"beneficiaryId,omitempty"`
+	AccountID     string `json:"accountId,omitempty"`
+	Description   string `json:"description,omitempty"`
 }
 
 type TransactionResult struct {
@@ -817,6 +824,9 @@ type Service struct {
 	accountingLedger    *AccountingLedger
 	secretsManager      *SecretsManager
 	outbox              *Outbox
+	// outboxCancel stops the single background outbox worker on Close so the
+	// goroutine terminates on shutdown instead of leaking.
+	outboxCancel context.CancelFunc
 	// outboxPublisher, when set, delivers an outbox event downstream; a non-nil
 	// error triggers retry/dead-letter instead of silently dropping (M-12).
 	outboxPublisher  func(*OutboxEvent) error
@@ -890,8 +900,19 @@ func NewService() *Service {
 		params:              config.Default(),
 	}
 	wireMuleEncoder()
-	go svc.startOutboxWorker()
+	// Single background outbox worker. It owns a cancellable context so Close()
+	// can stop it cleanly instead of leaking the goroutine.
+	outboxCtx, cancelOutbox := context.WithCancel(context.Background())
+	svc.outboxCancel = cancelOutbox
+	go svc.startOutboxWorker(outboxCtx)
 	return svc
+}
+
+// Close stops the background outbox worker. It is safe to call more than once.
+func (s *Service) Close() {
+	if s != nil && s.outboxCancel != nil {
+		s.outboxCancel()
+	}
 }
 
 // UseModelParams overrides the versioned model parameters (composition root).
@@ -913,25 +934,37 @@ func (s *Service) ModelParams() config.ModelParams {
 	return s.params
 }
 
-func (s *Service) startOutboxWorker() {
+// startOutboxWorker is the single poller that drains the outbox and publishes
+// each event downstream (Redis Streams via the wired outboxPublisher). It stops
+// when ctx is cancelled (Close), so it does not leak on shutdown. There must be
+// exactly one of these per Service — the previous api.startOutboxWorker in the
+// router was a duplicate that both leaked (it selected on context.Background().
+// Done(), which never fires) and competed for the same outbox.
+func (s *Service) startOutboxWorker(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		events := s.outbox.Dequeue(50)
-		for _, ev := range events {
-			// M-12 fix: only mark an event processed when its downstream publish
-			// actually succeeds. A failure goes through MarkFailed, which retries up
-			// to 3 times then dead-letters — previously every event was marked
-			// processed unconditionally, silently dropping anything that failed.
-			if err := s.publishOutboxEvent(ev); err != nil {
-				s.outbox.MarkFailed(ev.ID)
-				slog.Warn("outbox publish failed, will retry", "event", ev.ID, "topic", ev.Topic, "error", err)
-				continue
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("outbox worker shutting down")
+			return
+		case <-ticker.C:
+			events := s.outbox.Dequeue(50)
+			for _, ev := range events {
+				// M-12 fix: only mark an event processed when its downstream publish
+				// actually succeeds. A failure goes through MarkFailed, which retries up
+				// to 3 times then dead-letters — previously every event was marked
+				// processed unconditionally, silently dropping anything that failed.
+				if err := s.publishOutboxEvent(ev); err != nil {
+					s.outbox.MarkFailed(ev.ID)
+					slog.Warn("outbox publish failed, will retry", "event", ev.ID, "topic", ev.Topic, "error", err)
+					continue
+				}
+				s.outbox.MarkProcessed(ev.ID)
 			}
-			s.outbox.MarkProcessed(ev.ID)
+			s.outbox.Purge(6 * time.Hour) // drop long-processed events so the slice can't grow unbounded
+			s.pruneIdempotency()          // H-10: evict expired/oversized idempotency entries
 		}
-		s.outbox.Purge(6 * time.Hour) // drop long-processed events so the slice can't grow unbounded
-		s.pruneIdempotency()          // H-10: evict expired/oversized idempotency entries
 	}
 }
 

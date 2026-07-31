@@ -4,11 +4,13 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+
+	"FINIX/backend/internal/domain/platform"
 )
 
-// Strict field-level input validation. This complements decodeJSON's
-// DisallowUnknownFields (which already rejects any field not in the schema)
-// by enforcing formats, ranges and required-ness on the values themselves.
+// Strict field-level input validation. decodeJSON is lenient about unknown
+// fields by default (strict mode is opt-in via DECODE_STRICT_FIELDS), so this
+// layer enforces formats, ranges and required-ness on the values themselves.
 // Anything that does not match is rejected with a 400 before it reaches the
 // domain layer.
 
@@ -72,4 +74,12 @@ func validatePaymentAmount(paise int64) error {
 		return errors.New("amountPaise exceeds the per-transaction limit")
 	}
 	return nil
+}
+
+// ValidateTransactionRequest enforces the per-transaction invariants — a
+// positive amount within the ₹10,00,000 ceiling — before the request reaches
+// the domain layer, so an out-of-range amount is rejected with 400 rather than
+// processed.
+func ValidateTransactionRequest(req platform.InitiateTransactionRequest) error {
+	return validatePaymentAmount(req.AmountPaise)
 }
