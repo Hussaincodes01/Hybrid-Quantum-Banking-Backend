@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	mrand "math/rand"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,13 +21,14 @@ import (
 	"time"
 
 	"FINIX/backend/internal/config"
-	"FINIX/backend/internal/infra/ai"
 	"FINIX/backend/internal/domain/blockchain"
 	"FINIX/backend/internal/domain/fraud"
 	"FINIX/backend/internal/domain/healthscore"
 	"FINIX/backend/internal/domain/security"
 	"FINIX/backend/internal/domain/transaction"
+	"FINIX/backend/internal/infra/ai"
 	"FINIX/backend/internal/infra/repo"
+	"FINIX/backend/internal/ml/preprocess"
 	"FINIX/backend/internal/pkg/money"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -800,6 +802,8 @@ type Service struct {
 	adaptiveAuth        *security.AdaptiveAuthManager
 	threatResponse      *security.ThreatResponseManager
 	fraudGraph          *fraud.FraudGraph
+	mulePredictor       fraud.GraphPredictor
+	muleScores          map[string]float64
 	db                  *ServicePostgres
 	netWorthAssets      map[string][]NetWorthAsset
 	netWorthLiabilities map[string][]NetWorthLiability
@@ -869,6 +873,8 @@ func NewService() *Service {
 		adaptiveAuth:        security.NewAdaptiveAuthManager(),
 		threatResponse:      security.NewThreatResponseManager(),
 		fraudGraph:          fraud.NewFraudGraph(),
+		mulePredictor:       fraud.NewMuleONNXPredictor(envOrDefaultMulePath()),
+		muleScores:          make(map[string]float64),
 		netWorthAssets:      make(map[string][]NetWorthAsset),
 		netWorthLiabilities: make(map[string][]NetWorthLiability),
 		marketNews:          make([]MarketNewsItem, 0),
@@ -883,6 +889,7 @@ func NewService() *Service {
 		sessionStore:        NewInMemorySessionStore(),
 		params:              config.Default(),
 	}
+	wireMuleEncoder()
 	go svc.startOutboxWorker()
 	return svc
 }
@@ -1768,13 +1775,13 @@ func (s *Service) InitiateTransaction(userID, idempotencyKey string, req Initiat
 	// Publish risk.decision to outbox for downstream consumers (Python RAG validation, monitoring)
 	if s.outbox != nil {
 		riskEvent := map[string]interface{}{
-			"tx_id":          txnID,
-			"user_id":        userID,
-			"score":          assessment.Score,
-			"level":          string(assessment.Level),
-			"status":         status,
-			"model_version":  s.params.Version,
-			"ts":             now.UTC().Format(time.RFC3339Nano),
+			"tx_id":         txnID,
+			"user_id":       userID,
+			"score":         assessment.Score,
+			"level":         string(assessment.Level),
+			"status":        status,
+			"model_version": s.params.Version,
+			"ts":            now.UTC().Format(time.RFC3339Nano),
 		}
 		if payload, err := json.Marshal(riskEvent); err == nil {
 			s.outbox.Enqueue("risk.decision", string(payload))
@@ -1826,6 +1833,7 @@ func (s *Service) InitiateTransaction(userID, idempotencyKey string, req Initiat
 
 	// Feed the fraud graph so GNN risk propagation stays current
 	s.fraudGraph.AddTransaction(userID, req.Recipient, req.AmountPaise)
+	s.rebuildMuleScores()
 
 	// H-8 fix: enforce the blockchain smart-contract rules BEFORE money moves.
 	// Previously the event was written with WriteEvent, which only annotated a
@@ -2069,26 +2077,26 @@ func (s *Service) ValidateRisk(ctx context.Context, txID string, req ValidateRis
 		fmt.Sprintf("Risk validation applied: agrees_with_ml=%v, action=%s, new_status=%s",
 			req.Verdict.AgreesWithML, req.Verdict.RecommendedAction, newStatus), "AI")
 	_, _ = s.ledger.WriteEvent(context.Background(), tx.UserID, "risk_validation", "transaction", map[string]any{
-		"tx_id":             txID,
-		"agrees_with_ml":    req.Verdict.AgreesWithML,
-		"suggested_level":   req.Verdict.SuggestedLevel,
-		"confidence":        req.Verdict.Confidence,
-		"rationale":         req.Verdict.Rationale,
+		"tx_id":              txID,
+		"agrees_with_ml":     req.Verdict.AgreesWithML,
+		"suggested_level":    req.Verdict.SuggestedLevel,
+		"confidence":         req.Verdict.Confidence,
+		"rationale":          req.Verdict.Rationale,
 		"recommended_action": req.Verdict.RecommendedAction,
-		"old_status":        oldStatus,
-		"new_status":        newStatus,
+		"old_status":         oldStatus,
+		"new_status":         newStatus,
 	})
 
 	return ValidateRiskResponse{
-		Applied:    applied,
-		NewStatus:  newStatus,
-		OldStatus:  oldStatus,
+		Applied:   applied,
+		NewStatus: newStatus,
+		OldStatus: oldStatus,
 	}, nil
 }
 
 // ValidateRiskRequest is the request payload for risk validation
 type ValidateRiskRequest struct {
-	TxID    string        `json:"tx_id"`
+	TxID    string            `json:"tx_id"`
 	Verdict ValidationVerdict `json:"verdict"`
 }
 
@@ -2102,7 +2110,7 @@ type ValidateRiskResponse struct {
 // ValidationVerdict is the verdict sent from Python validation worker
 type ValidationVerdict struct {
 	AgreesWithML      bool     `json:"agrees_with_ml"`
-	SuggestedLevel    string   `json:"suggested_level"`    // "low", "medium", "high", "critical"
+	SuggestedLevel    string   `json:"suggested_level"` // "low", "medium", "high", "critical"
 	Confidence        float64  `json:"confidence"`
 	Rationale         string   `json:"rationale"`
 	RecommendedAction string   `json:"recommended_action"` // "allow", "step_up", "cooling_off", "block", "dismiss"
@@ -4111,11 +4119,156 @@ func balanceImpact(history []Transaction, amountPaise int64, accounts []Account)
 }
 
 func (s *Service) gnnScoreForRecipient(recipient string) float64 {
+	if score, ok := s.muleScores[recipient]; ok {
+		return score
+	}
 	if s.fraudGraph != nil {
 		return s.fraudGraph.GetRiskScore(recipient)
 	}
 	// Fallback to pattern-based scoring if fraud graph is not initialized
 	return fallbackGnnScore(recipient)
+}
+
+// rebuildMuleScores runs the ONNX mule GNN over all accounts and transactions
+// and caches per-account P(mule). If the model or its node encoder is unavailable
+// it clears the cache so gnnScoreForRecipient falls back to the FraudGraph.
+func (s *Service) rebuildMuleScores() {
+	// Skip the whole-graph rebuild unless the mule GNN can actually score (ONNX
+	// build + model + node encoder all present); otherwise gnnScoreForRecipient
+	// falls back to the FraudGraph and this per-transaction work is wasted.
+	if s.mulePredictor == nil || !s.mulePredictor.IsAvailable() || !fraud.MuleEncoderReady() {
+		return
+	}
+	input := s.buildMuleGraphInput()
+	scores, err := fraud.ScoreMuleAccounts(s.mulePredictor, input)
+	if err != nil || scores == nil {
+		s.muleScores = make(map[string]float64)
+		return
+	}
+	s.muleScores = scores
+}
+
+// buildMuleGraphInput assembles the mule-GNN input from live accounts and
+// successful transfers. It computes the 9 graph-aggregate node features the
+// training pipeline used (degrees, unique counterparties, incoming/outgoing
+// amount sums+means, in RUPEES to match the training units) plus the available
+// raw node fields; unavailable fields (avg_monthly_balance, monthly_income,
+// occupation, account_status, home_*) are omitted so the encoder mean-defaults
+// them. Encoding + scaling happen in fraud.encodeMuleNode via mule_preprocess.json.
+func (s *Service) buildMuleGraphInput() fraud.MuleGraphInput {
+	outCount := map[string]int{}
+	inCount := map[string]int{}
+	outSum := map[string]float64{}
+	inSum := map[string]float64{}
+	outRecips := map[string]map[string]struct{}{}
+	inSenders := map[string]map[string]struct{}{}
+
+	var transfers []fraud.MuleTransfer
+	for uid, txns := range s.transactions {
+		for _, t := range txns {
+			if t.Status != "success" && t.Status != "" {
+				continue
+			}
+			amt := float64(t.AmountPaise) / 100
+			to := t.Recipient
+			transfers = append(transfers, fraud.MuleTransfer{From: uid, To: to})
+
+			outCount[uid]++
+			outSum[uid] += amt
+			if outRecips[uid] == nil {
+				outRecips[uid] = map[string]struct{}{}
+			}
+			outRecips[uid][to] = struct{}{}
+
+			inCount[to]++
+			inSum[to] += amt
+			if inSenders[to] == nil {
+				inSenders[to] = map[string]struct{}{}
+			}
+			inSenders[to][uid] = struct{}{}
+		}
+	}
+
+	var accounts []fraud.MuleAccount
+	for uid, accs := range s.accounts {
+		num := map[string]float64{}
+		cat := map[string]string{}
+
+		if user := s.users[uid]; user != nil {
+			num["account_age_days"] = time.Now().UTC().Sub(user.CreatedAt).Hours() / 24.0
+			if user.EKYCVerified {
+				cat["kyc_status"] = "Verified"
+			} else {
+				cat["kyc_status"] = "Pending"
+			}
+		}
+		if len(accs) > 0 {
+			a := accs[0]
+			if at := capitalizeFirst(a.AccountType); at != "" {
+				cat["account_type"] = at
+			}
+			num["current_balance"] = float64(a.BalancePaise) / 100
+		}
+
+		od := float64(outCount[uid])
+		ind := float64(inCount[uid])
+		num["out_degree"] = od
+		num["in_degree"] = ind
+		num["total_degree"] = od + ind
+		num["unique_receivers"] = float64(len(outRecips[uid]))
+		num["unique_senders"] = float64(len(inSenders[uid]))
+		num["total_outgoing_amount"] = outSum[uid]
+		num["total_incoming_amount"] = inSum[uid]
+		num["avg_outgoing_amount"] = 0
+		if od > 0 {
+			num["avg_outgoing_amount"] = outSum[uid] / od
+		}
+		num["avg_incoming_amount"] = 0
+		if ind > 0 {
+			num["avg_incoming_amount"] = inSum[uid] / ind
+		}
+
+		accounts = append(accounts, fraud.MuleAccount{ID: uid, Raw: num, Cat: cat})
+	}
+
+	return fraud.MuleGraphInput{Accounts: accounts, Transfers: transfers}
+}
+
+func envOrDefaultMulePath() string {
+	p := os.Getenv("FINIX_MULE_MODEL_PATH")
+	if p == "" {
+		return "../../models/MuleAccountDetection.onnx"
+	}
+	return p
+}
+
+// wireMuleEncoder loads the mule node preprocessing artifact (mule_preprocess.json,
+// alongside the ONNX model) and wires it into the fraud package. An absent or
+// wrong-width artifact leaves the encoder unset so ScoreMuleAccounts fails safe.
+func wireMuleEncoder() {
+	path := preprocess.DefaultArtifactPath(envOrDefaultMulePath(), "mule_preprocess.json")
+	art, err := preprocess.Load(path)
+	if err != nil {
+		slog.Info("mule preprocess artifact unavailable; mule GNN gated off, using fraud graph",
+			"path", path, "error", err)
+		return
+	}
+	fraud.SetMuleEncoder(art)
+	if fraud.MuleEncoderReady() {
+		slog.Info("mule node encoder wired", "path", path, "features", art.FeatureCount())
+	} else {
+		slog.Warn("mule preprocess artifact wrong width; mule GNN gated off", "features", art.FeatureCount())
+	}
+}
+
+// capitalizeFirst upper-cases the first rune and lower-cases the rest, mapping
+// backend casing (e.g. "savings") onto the training vocab (e.g. "Savings").
+func capitalizeFirst(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	return strings.ToUpper(s[:1]) + strings.ToLower(s[1:])
 }
 
 func fallbackGnnScore(recipient string) float64 {

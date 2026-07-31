@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+
+	"FINIX/backend/internal/ml/preprocess"
 )
 
 // This file is the STRUCTURAL seam for the mule-account GNN
@@ -43,6 +45,25 @@ const (
 // from a genuine runtime failure and fail safe accordingly.
 var errMuleEncodingUnset = errors.New("fraud: mule node encoding not wired (pending preprocessing artifact)")
 
+// muleEncoder is the training-time node preprocessing (label encoders + scaler)
+// for the 20-column mule GNN input. It is set once at startup via SetMuleEncoder
+// from mule_preprocess.json. Until set (or if nil), encodeMuleNode fails safe so
+// ScoreMuleAccounts returns no scores and the caller uses the FraudGraph.
+var muleEncoder *preprocess.Artifact
+
+// SetMuleEncoder wires the 20-column node preprocessing artifact. Passing nil
+// (artifact absent or wrong width) leaves the encoder unset. Safe to call once
+// at service construction; it is process-global because there is a single model.
+func SetMuleEncoder(a *preprocess.Artifact) {
+	if a != nil && a.FeatureCount() != muleNodeFeatureWidth {
+		return // wrong artifact; leave unset so we fail safe rather than misencode
+	}
+	muleEncoder = a
+}
+
+// MuleEncoderReady reports whether the node encoder has been wired.
+func MuleEncoderReady() bool { return muleEncoder != nil }
+
 // GraphPredictor runs the mule-account GNN over an assembled payment graph.
 //
 // The model is multi-input, unlike the single-vector transaction predictor:
@@ -63,8 +84,14 @@ type GraphPredictor interface {
 // carries the identifier plus an open bag of raw numeric/categorical signals so
 // the caller need not change when the encoder is finalised.
 type MuleAccount struct {
-	ID  string
+	ID string
+	// Raw carries the numeric node signals keyed by the model's feature names
+	// (account_age_days, current_balance, in_degree, ...).
 	Raw map[string]float64
+	// Cat carries the categorical node signals as raw strings keyed by feature
+	// name (account_type, occupation, kyc_status, account_status, home_city,
+	// home_state, home_country); the encoder label-encodes + scales them.
+	Cat map[string]string
 }
 
 // MuleTransfer is one successful transfer. It becomes exactly one directed edge
@@ -215,68 +242,21 @@ func ScoreMuleAccounts(p GraphPredictor, in MuleGraphInput) (map[string]float64,
 }
 
 // encodeMuleNode turns one account's raw signals into the ordered 20-column
-// node feature vector the GNN expects.
+// node feature vector the GNN expects, using the training-time preprocessing
+// (mule_preprocess.json) wired via SetMuleEncoder. The 7 categoricals are
+// label-encoded and, together with 13 numerics, StandardScaled in the exact
+// feature order. Node signals the backend does not supply mean-default (scaled
+// to 0) — the neutral value — rather than being guessed.
 //
-// ponytail: feature ordering GUESSED from the dataset spec (Sections 3 + 5), NOT
-// verified against the training preprocessing artifact. When the training notebook
-// is found, replace this with the documented 20-column layout and lock with the
-// golden-vector test (mule_golden_test.go). Default to 0.5 for unknown features;
-// known features are crudely scaled to ~[0,1] so the linear layer produces
-// non-degenerate logits.
-//
-// Layout hypothesis (20 floats):
-//   0-10:  Section 3 raw features (minus account_id, user_id)
-//   11-15: Section 5 graph metrics (excluding Section 11 exclusions)
-//   16-19: Additional per-node aggregates (placeholder)
+// Feature order (from the training notebook): account_type, account_age_days,
+// current_balance, avg_monthly_balance, monthly_income, occupation, kyc_status,
+// account_status, home_city, home_state, home_country, in_degree, out_degree,
+// total_degree, unique_senders, unique_receivers, total_incoming_amount,
+// avg_incoming_amount, total_outgoing_amount, avg_outgoing_amount.
 func encodeMuleNode(acct MuleAccount) ([]float32, error) {
-	inDeg := acct.Raw["in_degree"]
-	outDeg := acct.Raw["out_degree"]
-	totalDeg := inDeg + outDeg
-
-	f := make([]float32, muleNodeFeatureWidth)
-
-	// Default unknown features to 0.5 (mid-range) so the linear layer doesn't
-	// blow up from extreme values. Override with available data below.
-	for i := range f {
-		f[i] = 0.5
+	if muleEncoder == nil {
+		return nil, errMuleEncodingUnset
 	}
-
-	// [0-10] Section 3 raw node features
-	f[0] = float32(acct.Raw["account_type"])                     // Savings=0,Current=1,Salary=2,Business=3
-	f[1] = float32(clampFloat(acct.Raw["account_age_days"]/3650, 0, 1)) // cap at ~10yrs
-	f[2] = float32(clampFloat(acct.Raw["current_balance"]/1e8, 0, 1))   // cap at ₹1Cr paise
-	f[3] = 0.5  // avg_monthly_balance (not available)
-	f[4] = 0.5  // monthly_income (not available)
-	f[5] = 0.5  // occupation (not available)
-	f[6] = float32(clampFloat(acct.Raw["kyc_status"], 0, 1))     // 0/1
-	f[7] = 0.5  // account_status (not available)
-	f[8] = 0.5  // home_city (not available)
-	f[9] = 0.5  // home_state (not available)
-	f[10] = 0.5 // home_country (not available)
-
-	// [11-15] Section 5 computed graph features
-	f[11] = float32(clampFloat(inDeg/100, 0, 1))     // In Degree (cap at 100)
-	f[12] = float32(clampFloat(outDeg/100, 0, 1))    // Out Degree (cap at 100)
-	f[13] = float32(clampFloat(totalDeg/200, 0, 1))  // Total Degree (cap at 200)
-	f[14] = 0.5 // 2-Hop Neighbours (not computed)
-	f[15] = 0.5 // 3-Hop Neighbours (not computed)
-
-	// [16-19] Additional per-node aggregates
-	if totalDeg > 0 {
-		f[16] = float32(clampFloat(inDeg/totalDeg, 0, 1))   // Fan-In Ratio [0,1]
-		f[17] = float32(clampFloat(outDeg/totalDeg, 0, 1))  // Fan-Out Ratio [0,1]
-	}
-	// f[18], f[19] = 0.5 (avg amount in/out, not computed)
-
-	return f, nil
-}
-
-func clampFloat(v, lo, hi float64) float64 {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
+	vec, _ := muleEncoder.BuildVector(acct.Raw, acct.Cat)
+	return vec, nil
 }
