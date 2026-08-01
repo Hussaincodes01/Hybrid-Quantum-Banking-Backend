@@ -726,7 +726,7 @@ func (s *Service) handleTransactionEndpoints(userID, endpointID string, input En
 			if s.transactions[userID][i].ID != txID {
 				continue
 			}
-			scheduledFor := time.Now().UTC().Add(6 * time.Hour)
+			scheduledFor := time.Now().UTC().Add(s.coolingOffWindow())
 			s.transactions[userID][i].Status = "scheduled"
 			s.transactions[userID][i].CoolingOffUntil = &scheduledFor
 			s.appendAuditLocked(userID, "transaction_scheduled", "transaction", "success", "Blocked transaction scheduled after cooling window", "User")
@@ -1028,7 +1028,7 @@ func (s *Service) handleInvestmentEndpoints(userID, endpointID string, input End
 		var coolingOffUntil any
 		if recipientRisk > 0.8 {
 			status = "cooling_off"
-			coolingOffUntil = time.Now().UTC().Add(6 * time.Hour)
+			coolingOffUntil = time.Now().UTC().Add(s.coolingOffWindow())
 		}
 		// M-13 fix: a BUY order moves real money out of the account. Verify funds and
 		// debit BEFORE marking the order executed, so we can't report a phantom

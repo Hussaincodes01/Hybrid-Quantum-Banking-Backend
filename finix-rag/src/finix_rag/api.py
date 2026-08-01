@@ -22,6 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import structlog
 
+from finix_rag import backend_bridge
 from finix_rag.security.auth import TokenManager, TokenPayload, UserRole
 from finix_rag.security.opa_client import OPAAuthorizer
 from finix_rag.ingestion.secure_ingestor import SecureIngestor
@@ -93,8 +94,16 @@ app.add_middleware(
     allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000").split(","),
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "Content-Type"],
+    # X-Internal-Token is used by the Go backend bridge (see backend_bridge.py).
+    allow_headers=["Authorization", "Content-Type", "X-Internal-Token"],
 )
+
+# Service-to-service surface consumed by the Go backend
+# (backend/internal/infra/ai/rag_client.go): /v1/rag/chat, /v1/rag/sms and
+# /v1/rag/tool/risk, authenticated with the shared FINIX_INTERNAL_TOKEN.
+# Without this the backend's AI_PROVIDER=remote mode 404s on every call.
+backend_bridge.set_engine_provider(lambda: query_engine)
+app.include_router(backend_bridge.router)
 
 security = HTTPBearer()
 

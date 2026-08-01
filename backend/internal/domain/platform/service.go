@@ -934,6 +934,17 @@ func NewService() *Service {
 	return svc
 }
 
+// coolingOffWindow is how long a blocked transaction locks further payments,
+// from the versioned model parameters (§6.3 base 240 min, overridable with
+// FINIX_COOLOFF_BASE_MINUTES). Falls back to the 4h spec base if unset.
+func (s *Service) coolingOffWindow() time.Duration {
+	minutes := s.params.CoolingOff.BaseMinutes
+	if minutes <= 0 {
+		minutes = 240
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
 // Close stops the background outbox worker. It is safe to call more than once.
 func (s *Service) Close() {
 	if s != nil && s.outboxCancel != nil {
@@ -1821,7 +1832,12 @@ func (s *Service) InitiateTransaction(userID, idempotencyKey string, req Initiat
 	if authDecision.IsBlocked {
 		status = "blocked"
 		stepUp = true
-		t := now.Add(6 * time.Hour)
+		// Use the configured window (spec §6.3 base = 240 min) instead of a
+		// hardcoded 6h. CoolingOffParams.BaseMinutes is validated at startup and
+		// overridable with FINIX_COOLOFF_BASE_MINUTES — previously that setting
+		// existed but nothing read it, so the lock was always 6h and a demo
+		// could not recover after showing a blocked transaction.
+		t := now.Add(s.coolingOffWindow())
 		cooling = &t
 	} else if authDecision.RequireOTP || authDecision.RequireAck {
 		status = "warning_ack_required"
