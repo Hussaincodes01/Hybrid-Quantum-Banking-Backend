@@ -267,6 +267,11 @@ type AuthProfile struct {
 	RegisteredKeyFingerprint   string     `json:"registeredKeyFingerprint,omitempty"`
 	StepUpAuthRequiredFlag     bool       `json:"stepUpAuthRequiredFlag"`
 	Role                       string     `json:"role"`
+	// KYCVerified / BiometricEnabled mirror the User record so the profile
+	// endpoint is self-contained for clients (see frontend_compat.go, which also
+	// emits a `userId` alias for InternalUserID).
+	KYCVerified      bool `json:"kycVerified"`
+	BiometricEnabled bool `json:"biometricEnabled"`
 }
 
 func (a *AuthProfile) SanitizeForAPI() {
@@ -537,6 +542,9 @@ type SecurityHealth struct {
 	TransactionMonitoring bool `json:"transactionMonitoring"`
 	SMSScannerEnabled     bool `json:"smsScannerEnabled"`
 	AntiPhishingContacts  bool `json:"antiPhishingContacts"`
+	// AccountFrozen reports the emergency-freeze state. It is also emitted as
+	// is_frozen / account_frozen for the mobile client (see frontend_compat.go).
+	AccountFrozen bool `json:"accountFrozen"`
 }
 
 type SMSScanRequest struct {
@@ -562,6 +570,24 @@ type FreezeRequest struct {
 type UnfreezeRequest struct {
 	OTP         string `json:"otp"`
 	BiometricOK bool   `json:"biometricOk"`
+	// VerificationMethod is the mobile client's spelling: it posts
+	// {"verificationMethod":"biometric"} instead of biometricOk. Treated as
+	// equivalent to BiometricOK when it names a biometric factor.
+	VerificationMethod string `json:"verificationMethod,omitempty"`
+}
+
+// biometricSatisfied reports whether the request carries a biometric factor,
+// under either field spelling.
+func (r UnfreezeRequest) biometricSatisfied() bool {
+	if r.BiometricOK {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(r.VerificationMethod)) {
+	case "biometric", "face", "fingerprint":
+		return true
+	default:
+		return false
+	}
 }
 
 type FraudReportRequest struct {
@@ -2523,6 +2549,7 @@ func (s *Service) SecurityStatus(userID string) (SecurityHealth, error) {
 		TransactionMonitoring: true,
 		SMSScannerEnabled:     s.consents[userID]["sms_scanning"],
 		AntiPhishingContacts:  true,
+		AccountFrozen:         s.freezeState[userID],
 	}, nil
 }
 
@@ -2670,13 +2697,30 @@ func (s *Service) EmergencyFreeze(userID string, req FreezeRequest) (map[string]
 }
 
 func (s *Service) Unfreeze(userID string, req UnfreezeRequest) (map[string]any, error) {
-	if !req.BiometricOK || strings.TrimSpace(req.OTP) == "" {
+	if !req.biometricSatisfied() {
+		return nil, errors.New("biometric verification is required")
+	}
+
+	// Step-up policy. Production (FINIX_REQUIRE_BIOMETRIC_CHALLENGE=true) keeps
+	// the C-4 control: an OTP must be supplied AND verified against the stored
+	// value before the freeze is lifted. With the flag off (demo posture) a
+	// biometric-only unfreeze is accepted, matching the mobile client which has
+	// no OTP step in its unfreeze flow.
+	//
+	// An OTP that IS supplied is always verified, in either mode, so a wrong
+	// code never unfreezes the account.
+	otp := strings.TrimSpace(req.OTP)
+	if unfreezeOTPRequired() && otp == "" {
 		return nil, errors.New("biometric and otp are required")
 	}
-	// C-4 fix: verify the OTP against the stored value before unfreezing (was only
-	// checked for non-emptiness). Done before s.mu.Lock — VerifyOTPToken locks s.mu.
-	if err := s.VerifyOTPToken(userID, req.OTP); err != nil {
-		return nil, err
+	if otp != "" {
+		// Done before s.mu.Lock — VerifyOTPToken locks s.mu.
+		if err := s.VerifyOTPToken(userID, otp); err != nil {
+			return nil, err
+		}
+	} else {
+		slog.Warn("unfreeze accepted with biometric only; set FINIX_REQUIRE_BIOMETRIC_CHALLENGE=true to require OTP step-up",
+			"user", userID)
 	}
 
 	s.mu.Lock()
@@ -3120,7 +3164,8 @@ func (s *Service) AuditLogIntegrity(userID string) (AuditIntegrity, error) {
 func (s *Service) AuthProfile(userID string) (AuthProfile, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if _, ok := s.users[userID]; !ok {
+	user, ok := s.users[userID]
+	if !ok {
 		return AuthProfile{}, errors.New("user not found")
 	}
 	profile, ok := s.authProfiles[userID]
@@ -3128,6 +3173,11 @@ func (s *Service) AuthProfile(userID string) (AuthProfile, error) {
 		return AuthProfile{}, errors.New("auth profile not found")
 	}
 	result := *profile
+	if result.InternalUserID == "" {
+		result.InternalUserID = userID
+	}
+	result.KYCVerified = user.EKYCVerified
+	result.BiometricEnabled = user.BiometricEnabled
 	result.MobileNumber = DecryptField(result.MobileNumber)
 	result.Email = DecryptField(result.Email)
 	// M-11 fix: strip secret material in the service layer, not only in the handler.

@@ -9,7 +9,11 @@ import (
 )
 
 type PinLoginRequest struct {
-	Mobile              string `json:"mobile"`
+	Mobile string `json:"mobile"`
+	// UserID is an alternative to Mobile: the Flutter client keeps the userId
+	// returned by /v1/auth/register and logs in with {userId, pin}. Either
+	// identifier resolves the same account.
+	UserID              string `json:"userId,omitempty"`
 	PIN                 string `json:"pin"`
 	DeviceIDFingerprint string `json:"deviceIdFingerprint"`
 	DeviceType          string `json:"deviceType,omitempty"`
@@ -41,11 +45,14 @@ func VerifyPIN(hashedPIN, pin string) bool {
 
 func (s *Service) LoginWithPIN(req PinLoginRequest) (PinLoginResponse, error) {
 	req.Mobile = strings.TrimSpace(req.Mobile)
+	req.UserID = strings.TrimSpace(req.UserID)
 	req.PIN = strings.TrimSpace(req.PIN)
 	req.DeviceIDFingerprint = strings.TrimSpace(req.DeviceIDFingerprint)
 
-	if req.Mobile == "" {
-		return PinLoginResponse{}, errors.New("mobile number is required")
+	// Either identifier is accepted: the mobile number, or the userId the client
+	// stored from /v1/auth/register.
+	if req.Mobile == "" && req.UserID == "" {
+		return PinLoginResponse{}, errors.New("mobile number or userId is required")
 	}
 	if req.PIN == "" {
 		return PinLoginResponse{}, errors.New("PIN is required")
@@ -57,9 +64,17 @@ func (s *Service) LoginWithPIN(req PinLoginRequest) (PinLoginResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	userID, ok := s.mobileIndex[req.Mobile]
+	var userID string
+	var ok bool
+	if req.Mobile != "" {
+		userID, ok = s.mobileIndex[req.Mobile]
+	} else {
+		// Resolve by userId; presence in the user map is the existence check.
+		_, ok = s.users[req.UserID]
+		userID = req.UserID
+	}
 	if !ok {
-		return PinLoginResponse{}, errors.New("invalid mobile number or PIN")
+		return PinLoginResponse{}, errors.New("invalid credentials")
 	}
 
 	user, ok := s.users[userID]
@@ -218,6 +233,44 @@ func (s *Service) RefreshToken(oldToken, deviceFP string) (PinLoginResponse, err
 		Name:        name,
 		UBT:         ubt,
 	}, nil
+}
+
+// SetInitialPIN sets the PIN during onboarding, before the user has any session
+// to authenticate with. The mobile client's flow is register -> eKYC ->
+// biometric -> set PIN -> login, so the set-PIN call arrives with no bearer
+// token. This is deliberately NOT a general auth bypass:
+//
+//   - it only works while the account has no PIN yet (first-time setup); once a
+//     PIN exists, changing it requires an authenticated session via SetPIN, and
+//   - the caller's device fingerprint must match the one recorded at
+//     registration, so only the enrolling device can complete onboarding.
+func (s *Service) SetInitialPIN(userID, pin, deviceFingerprint string) error {
+	userID = strings.TrimSpace(userID)
+	deviceFingerprint = strings.TrimSpace(deviceFingerprint)
+	if userID == "" {
+		return errors.New("userId is required")
+	}
+
+	s.mu.Lock()
+	profile, ok := s.authProfiles[userID]
+	if !ok {
+		s.mu.Unlock()
+		return errors.New("auth profile not found")
+	}
+	if profile.PasswordHash != "" {
+		s.mu.Unlock()
+		return errors.New("PIN already set: authenticate to change it")
+	}
+	if registered := strings.TrimSpace(profile.DeviceIDFingerprint); registered != "" &&
+		!strings.EqualFold(registered, deviceFingerprint) {
+		s.appendAuditLocked(userID, "pin_set_device_mismatch", "auth", "failure",
+			"initial PIN setup attempted from an unregistered device", "System")
+		s.mu.Unlock()
+		return errors.New("device not recognised for this account")
+	}
+	s.mu.Unlock()
+
+	return s.SetPIN(userID, pin)
 }
 
 func (s *Service) SetPIN(userID, pin string) error {

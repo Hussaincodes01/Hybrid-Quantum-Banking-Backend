@@ -1348,6 +1348,12 @@ func (api *API) pinLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The mobile client sends its device fingerprint as a header on every
+	// request rather than in the login body; fall back to it so the device-bound
+	// check still has a value.
+	if strings.TrimSpace(req.DeviceIDFingerprint) == "" {
+		req.DeviceIDFingerprint = strings.TrimSpace(r.Header.Get("X-Device-Fingerprint"))
+	}
 	res, err := api.svc.LoginWithPIN(req)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, err.Error())
@@ -1384,19 +1390,35 @@ func (api *API) refreshToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) pinSet(w http.ResponseWriter, r *http.Request) {
-	uid, err := userIDFromRequest(r)
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, err.Error())
-		return
-	}
 	var req struct {
-		PIN string `json:"pin"`
+		PIN    string `json:"pin"`
+		UserID string `json:"userId,omitempty"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := api.svc.SetPIN(uid, req.PIN); err != nil {
+
+	// Authenticated PIN change (session present) — the normal path.
+	if uid, err := userIDFromRequest(r); err == nil {
+		if err := api.svc.SetPIN(uid, req.PIN); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "pin_set"})
+		return
+	}
+
+	// Onboarding: register -> eKYC -> biometric -> set PIN -> login, so this call
+	// arrives before any token exists. SetInitialPIN only succeeds when the
+	// account has no PIN yet AND the request comes from the device that
+	// registered it, so this is not a general unauthenticated PIN reset.
+	uid := strings.TrimSpace(req.UserID)
+	if uid == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized: supply a bearer token, or userId during onboarding")
+		return
+	}
+	if err := api.svc.SetInitialPIN(uid, req.PIN, r.Header.Get("X-Device-Fingerprint")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2153,7 +2175,10 @@ func (api *API) portfolioInsurance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+	// Return the aggregate object ({totalLifeCoverPaise, totalHealthCoverPaise,
+	// policies:[...]}) rather than a bare array: the mobile client decodes this
+	// endpoint as a map and reads the cover totals directly.
+	writeJSON(w, http.StatusOK, platform.BuildInsurancePortfolio(res))
 }
 
 func (api *API) portfolioLoans(w http.ResponseWriter, r *http.Request) {
