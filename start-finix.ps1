@@ -60,7 +60,11 @@ param(
     # Reserved ngrok domain, if the account has one. Without it ngrok issues a
     # random hostname that changes on every restart, which breaks an APK built
     # with --dart-define=FINIX_BASE_URL.
-    [string]$NgrokDomain = "",
+    # Reserved on this account. Keeping it as the default means every restart
+    # reclaims the same hostname, so an APK built with
+    # --dart-define=FINIX_BASE_URL keeps working. Override or pass "" for a
+    # throwaway random hostname.
+    [string]$NgrokDomain = "parrot-novel-loudly.ngrok-free.app",
     [string]$GroqApiKey = "",
     [switch]$WithRag,
     [int]$CoolOffMinutes = 1
