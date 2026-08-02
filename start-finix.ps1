@@ -179,8 +179,20 @@ print(','.join(missing))
 Step "[4/5] backend"
 $log = Join-Path $env:TEMP "finix-backend.log"
 Push-Location $backendDir
-$procs += Start-Process -FilePath "go" -ArgumentList "run","./cmd/server" `
+
+# Compile first and run the binary directly rather than `go run`. `go run`
+# builds to a temp file and spawns it as a CHILD, so killing the `go` process
+# leaves that child holding the port — the next start then fails with "address
+# already in use". Running the binary ourselves means the PID we track is the
+# server, and shutdown actually stops it.
+$exe = Join-Path $env:TEMP "finix-server.exe"
+Info "compiling..."
+& go build -o $exe ./cmd/server
+if ($LASTEXITCODE -ne 0) { Bad "go build failed"; Pop-Location; exit 1 }
+
+$backend = Start-Process -FilePath $exe `
     -RedirectStandardOutput $log -RedirectStandardError "$log.err" -NoNewWindow -PassThru
+$procs += $backend
 Pop-Location
 
 if (-not (Wait-Healthy "http://127.0.0.1:$Port/healthz" 90)) {
@@ -240,10 +252,23 @@ Write-Host ""
 Write-Host "Ctrl+C to stop everything." -ForegroundColor DarkGray
 
 try {
+    # Only the backend exiting is fatal. The tunnel is launched through a cmd
+    # wrapper that exits as soon as npx takes over, so treating ANY tracked
+    # process exit as fatal tore the whole stack down seconds after it came up.
+    # The tunnel is watched by re-checking the URL instead of by PID.
+    $tunnelWarned = $false
     while ($true) {
-        Start-Sleep -Seconds 3
-        foreach ($p in $procs) {
-            if ($p -and $p.HasExited) { Warn "a child process exited (pid $($p.Id)); shutting down"; throw "child exited" }
+        Start-Sleep -Seconds 5
+        if ($backend.HasExited) { Warn "backend exited; shutting down"; break }
+
+        if ($Tunnel -and -not $tunnelWarned -and $publicUrl -like "https://*") {
+            try {
+                Invoke-WebRequest -Uri "$publicUrl/healthz" -TimeoutSec 20 -UseBasicParsing | Out-Null
+            } catch {
+                Warn "tunnel is not responding - restart it with:"
+                Info "  npx localtunnel --port $Port --subdomain $Subdomain"
+                $tunnelWarned = $true   # say it once, keep the backend running
+            }
         }
     }
 } catch {
