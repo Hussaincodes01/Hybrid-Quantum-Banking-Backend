@@ -42,7 +42,9 @@ $repoRoot = Split-Path -Parent $PSScriptRoot   # ...\backend
 
 function New-Secret([int]$Bytes) {
     $buf = New-Object byte[] $Bytes
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($buf)
+    # ::Fill is .NET Core only and throws on Windows PowerShell 5.1.
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($buf) } finally { $rng.Dispose() }
     ($buf | ForEach-Object { $_.ToString("x2") }) -join ""
 }
 
