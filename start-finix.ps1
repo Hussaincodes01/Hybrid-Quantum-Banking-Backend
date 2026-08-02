@@ -52,7 +52,15 @@
 param(
     [int]$Port = 8080,
     [switch]$Tunnel,
+    # ngrok is ~30x faster than localtunnel here (0.3s vs 9-12s per request) and
+    # is used whenever it is installed and authenticated.
+    [ValidateSet("auto","ngrok","localtunnel")]
+    [string]$TunnelProvider = "auto",
     [string]$Subdomain = "finix-psb-demo",
+    # Reserved ngrok domain, if the account has one. Without it ngrok issues a
+    # random hostname that changes on every restart, which breaks an APK built
+    # with --dart-define=FINIX_BASE_URL.
+    [string]$NgrokDomain = "",
     [string]$GroqApiKey = "",
     [switch]$WithRag,
     [int]$CoolOffMinutes = 1
@@ -300,7 +308,47 @@ Good "backend healthy on :$Port"
 Step "[5/5] public access"
 $publicUrl = "http://localhost:$Port"
 if ($Tunnel) {
-    if (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
+    $ngrok = Get-Command ngrok -ErrorAction SilentlyContinue
+    if (-not $ngrok) {
+        $p = Join-Path $env:USERPROFILE "bin
+grok.exe"
+        if (Test-Path $p) { $ngrok = @{ Source = $p } }
+    }
+    $useNgrok = switch ($TunnelProvider) {
+        "ngrok"       { $true }
+        "localtunnel" { $false }
+        default       { [bool]$ngrok }
+    }
+
+    if ($useNgrok -and $ngrok) {
+        $nlog = Join-Path $env:TEMP "finix-ngrok.log"
+        Remove-Item $nlog -ErrorAction SilentlyContinue
+        $args = @("http", "$Port", "--log=stdout", "--log-format=json")
+        if ($NgrokDomain) { $args += "--url=$NgrokDomain" }
+        $procs += Start-Process -FilePath $ngrok.Source -ArgumentList $args `
+            -RedirectStandardOutput $nlog -RedirectStandardError "$nlog.err" `
+            -WindowStyle Hidden -PassThru
+        # The agent publishes the assigned hostname on its local API.
+        foreach ($i in 1..40) {
+            Start-Sleep -Seconds 1
+            try {
+                $t = (Invoke-WebRequest "http://127.0.0.1:4040/api/tunnels" -TimeoutSec 3 -UseBasicParsing).Content | ConvertFrom-Json
+                $https = $t.tunnels | Where-Object { $_.public_url -like "https://*" } | Select-Object -First 1
+                if ($https) { $publicUrl = $https.public_url; break }
+            } catch { }
+        }
+        if ($publicUrl -like "https://*") {
+            Good "public URL: $publicUrl  (ngrok)"
+            if (-not $NgrokDomain) {
+                Warn "this hostname is random and changes on restart; an APK built against it"
+                Info "will stop working. Reserve a free static domain at"
+                Info "https://dashboard.ngrok.com/domains and pass -NgrokDomain <name>"
+            }
+        } else {
+            Warn "ngrok produced no URL - see $nlog.err"
+        }
+    }
+    elseif (-not (Get-Command npx -ErrorAction SilentlyContinue)) {
         Bad "npx not found - cannot start localtunnel; running local-only"
     } else {
         $tl = Join-Path $env:TEMP "finix-tunnel.log"
