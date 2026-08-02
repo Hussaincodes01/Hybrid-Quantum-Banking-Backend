@@ -127,7 +127,11 @@ func Load() *Config {
 		Groq: GroqConfig{
 			APIKey:  os.Getenv("GROQ_API_KEY"),
 			BaseURL: envOrDefault("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-			Model:   envOrDefault("GROQ_MODEL", "llama3-8b-8192"),
+			// llama3-8b-8192 was the previous default but Groq has decommissioned
+			// it — the API rejects it, the chat call errors, and the service
+			// silently falls back to template replies. Default to a model that
+			// is actually served; override with GROQ_MODEL.
+			Model: envOrDefault("GROQ_MODEL", "llama-3.3-70b-versatile"),
 		},
 		Models: ModelsConfig{
 			RiskModelPath: envOrDefault("FINIX_RISK_MODEL_PATH", "../../models/transaction_risk_model.onnx"),

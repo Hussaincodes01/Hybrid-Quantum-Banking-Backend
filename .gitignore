@@ -110,6 +110,8 @@ config/local/
 # (scripts/start-local.bat is intentionally kept)
 *.bat
 *.cmd
+# The demo launcher is meant to be checked in: it is how the stack is started.
+!start-finix.bat
 
 # ==========================================
 # TEST OUTPUTS

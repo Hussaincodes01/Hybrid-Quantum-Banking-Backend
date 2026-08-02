@@ -113,6 +113,29 @@ if ($env:JAVA_HOME -and -not (Test-Path (Join-Path $env:JAVA_HOME "bin\java.exe"
 
 # ── Secrets and configuration ──────────────────────────────────────────
 Step "[2/5] configuration"
+
+# Load .env.local first so real keys live in a gitignored file rather than on a
+# command line (where they end up in shell history) or in a committed script.
+# Values already exported in the environment win, so CI or a one-off override
+# still takes precedence.
+$envFile = Join-Path $root ".env.local"
+if (Test-Path $envFile) {
+    $loaded = 0
+    foreach ($line in Get-Content $envFile) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith("#") -or ($t -notmatch "=")) { continue }
+        $k, $v = $t.Split("=", 2)
+        $k = $k.Trim(); $v = $v.Trim().Trim('"')
+        if (-not $k -or -not $v) { continue }              # blank => let us generate one
+        if (-not [Environment]::GetEnvironmentVariable($k)) {
+            Set-Item -Path "env:$k" -Value $v
+            $loaded++
+        }
+    }
+    Good ".env.local loaded ($loaded values)"
+} else {
+    Info "no .env.local (copy .env.local.example to add your Groq key)"
+}
 if (-not $env:FINIX_JWT_SECRET)          { $env:FINIX_JWT_SECRET          = New-Secret 32 }
 if (-not $env:FINIX_DATA_ENCRYPTION_KEY) { $env:FINIX_DATA_ENCRYPTION_KEY = New-Secret 32 }  # 64 hex chars
 if (-not $env:FINIX_AADHAAR_HASH_KEY)    { $env:FINIX_AADHAAR_HASH_KEY    = New-Secret 32 }

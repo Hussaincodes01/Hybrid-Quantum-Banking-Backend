@@ -53,7 +53,10 @@ func NewChatbotClient() *ChatbotClient {
 	}
 	model := GetSecret("GROQ_MODEL")
 	if model == "" {
-		model = "llama3-8b-8192"
+		// llama3-8b-8192 has been decommissioned by Groq: the API rejects it,
+		// the chat call errors, and the service quietly degrades to template
+		// replies that look like a working chatbot. Default to a served model.
+		model = "llama-3.3-70b-versatile"
 	}
 	return &ChatbotClient{
 		baseURL: baseURL,
@@ -63,6 +66,16 @@ func NewChatbotClient() *ChatbotClient {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// Model reports the model this client actually calls, so the audit trail and
+// the explainability shown to the user name the real model rather than a
+// hardcoded string that drifts whenever GROQ_MODEL is set.
+func (c *ChatbotClient) Model() string {
+	if c == nil {
+		return ""
+	}
+	return c.model
 }
 
 func (c *ChatbotClient) Query(ctx context.Context, systemPrompt string, userPrompt string, history []ChatMessage) (string, error) {
