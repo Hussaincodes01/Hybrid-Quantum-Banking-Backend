@@ -79,6 +79,38 @@ function New-Secret([int]$bytes) {
     ($b | ForEach-Object { $_.ToString("x2") }) -join ""
 }
 
+
+function Start-Infra([string]$ragDir) {
+    # Brings up the four containers finix-rag needs. Each is checked first so
+    # re-running the launcher is idempotent. OPA is pinned to 0.70.0 because
+    # config/opa-policy.rego is Rego v0 and OPA 1.0+ crash-loops on it.
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Bad "docker not found - cannot start Qdrant/OPA/Vault/Redis"; return
+    }
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Warn "Docker daemon not running - start Docker Desktop first"; return }
+
+    $running = @((docker ps --format "{{.Names}}") -split "`n" | ForEach-Object { $_.Trim() })
+    $specs = @(
+        @{ n = "finix-qdrant"; a = @("run","-d","--name","finix-qdrant","-p","6333:6333","qdrant/qdrant") },
+        @{ n = "finix-redis";  a = @("run","-d","--name","finix-redis","-p","6379:6379","redis:7-alpine") },
+        @{ n = "finix-vault";  a = @("run","-d","--name","finix-vault","-p","8200:8200","--cap-add=IPC_LOCK",
+                                     "-e","VAULT_DEV_ROOT_TOKEN_ID=dev-only-token",
+                                     "-e","VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200",
+                                     "hashicorp/vault:1.17","server","-dev") },
+        @{ n = "finix-opa";    a = @("run","-d","--name","finix-opa","-p","8181:8181",
+                                     "-v","$ragDir\config\opa-policy.rego:/policies/finix-authz.rego:ro",
+                                     "openpolicyagent/opa:0.70.0","run","--server","--addr=0.0.0.0:8181",
+                                     "/policies/finix-authz.rego") }
+    )
+    foreach ($spec in $specs) {
+        if ($running -contains $spec.n) { Info "$($spec.n) already running"; continue }
+        docker rm -f $spec.n 2>&1 | Out-Null
+        docker @($spec.a) 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Good "started $($spec.n)" } else { Warn "could not start $($spec.n)" }
+    }
+}
+
 function Wait-Healthy([string]$url, [int]$seconds) {
     foreach ($i in 1..$seconds) {
         Start-Sleep -Seconds 1
@@ -181,6 +213,7 @@ print(','.join(m for m in mods if importlib.util.find_spec(m) is None))
             $ragOk = $false
         }
     }
+    if ($ragOk) { Start-Infra $ragDir; Start-Sleep -Seconds 8 }
     # Qdrant is the hard dependency — the service aborts startup without it.
     if ($ragOk) {
         try {
