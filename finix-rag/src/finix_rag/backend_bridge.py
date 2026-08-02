@@ -164,17 +164,26 @@ async def rag_chat(request: ChatRequest) -> ChatResponse:
 
     # The engine expects a user principal; the backend has already
     # authenticated the end user, so pass its identity through for audit.
+    #
+    # The clearance level must match what config/opa-policy.rego grants the
+    # role — its role_clearance table puts "analyst" at 3, and the confidential
+    # rule requires clearance_level >= 3. Hardcoding 1 made OPA deny every
+    # query with "Access denied", so the whole pipeline ran and then refused to
+    # answer. Both are overridable for deployments with a stricter policy.
     try:
         from finix_rag.security.auth import TokenPayload, UserRole
 
+        role = os.getenv("FINIX_RAG_BRIDGE_ROLE", UserRole.ANALYST.value)
+        clearance = int(os.getenv("FINIX_RAG_BRIDGE_CLEARANCE", "3"))
         principal = TokenPayload(
             sub=request.user_id or "finix-backend",
-            role=UserRole.ANALYST if hasattr(UserRole, "ANALYST") else None,
+            role=UserRole(role),
             department="general",
-            clearance_level=1,
+            clearance_level=clearance,
             tenant_id="default",
         )
-    except Exception:  # pragma: no cover - principal shape varies by build
+    except Exception as exc:  # pragma: no cover - principal shape varies by build
+        logger.warning("rag_bridge_principal_fallback", error=str(exc))
         principal = None
 
     try:

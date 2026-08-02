@@ -167,10 +167,13 @@ if ($WithRag) {
     if (-not (Test-Path $ragDir)) { Bad "finix-rag directory not found"; $ragOk = $false }
     if ($ragOk) {
         # Import-check the heavy dependency chain before promising anything.
+        # `import importlib` alone does NOT bind importlib.util - it must be
+        # imported explicitly or find_spec raises AttributeError and the probe
+        # dies instead of reporting missing packages.
         $probe = & python -c "
-import importlib, sys
-missing = [m for m in ('fastapi','uvicorn','llama_index','qdrant_client') if not importlib.util.find_spec(m)]
-print(','.join(missing))
+import importlib.util
+mods = ('fastapi','uvicorn','llama_index','qdrant_client')
+print(','.join(m for m in mods if importlib.util.find_spec(m) is None))
 " 2>$null
         if ($probe) {
             Bad "missing Python packages: $probe"
@@ -178,13 +181,48 @@ print(','.join(missing))
             $ragOk = $false
         }
     }
+    # Qdrant is the hard dependency — the service aborts startup without it.
+    if ($ragOk) {
+        try {
+            Invoke-WebRequest "http://localhost:6333/healthz" -TimeoutSec 4 -UseBasicParsing | Out-Null
+        } catch {
+            Bad "Qdrant is not reachable on :6333 - finix-rag cannot start"
+            Info "start it with:  docker run -d --name finix-qdrant -p 6333:6333 qdrant/qdrant"
+            $ragOk = $false
+        }
+    }
+    # OPA is equally hard, just less obviously: the service starts fine without
+    # it and then denies EVERY query ("Access denied"), because authorization
+    # fails closed when the policy engine is unreachable. Catch it here rather
+    # than let that look like a permissions bug.
+    if ($ragOk) {
+        try {
+            Invoke-WebRequest "http://localhost:8181/health" -TimeoutSec 4 -UseBasicParsing | Out-Null
+        } catch {
+            Bad "OPA is not reachable on :8181 - RAG would deny every query"
+            Info "start it (pin 0.70.0: the policy is Rego v0 and OPA 1.0+ rejects it):"
+            Info "  docker run -d --name finix-opa -p 8181:8181 -v <repo>inix-rag\config\opa-policy.rego:/policies/finix-authz.rego:ro openpolicyagent/opa:0.70.0 run --server --addr=0.0.0.0:8181 /policies/finix-authz.rego"
+            $ragOk = $false
+        }
+    }
     if ($ragOk) {
         $ragLog = Join-Path $env:TEMP "finix-rag.log"
         $env:PYTHONPATH = Join-Path $ragDir "src"
+        # llama-index's QdrantVectorStore requires a non-empty api_key next to a
+        # url, even though a local Qdrant runs unauthenticated.
+        if (-not $env:QDRANT_HOST)    { $env:QDRANT_HOST = "localhost" }
+        if (-not $env:QDRANT_PORT)    { $env:QDRANT_PORT = "6333" }
+        if (-not $env:QDRANT_API_KEY) { $env:QDRANT_API_KEY = "local-dev" }
+        # The bridge fails closed without this, and it must be the SAME value the
+        # backend sends, so a generated-per-run token would break the pairing.
+        if (-not $env:FINIX_INTERNAL_TOKEN) {
+            Warn "FINIX_INTERNAL_TOKEN is unset - pin it in .env.local so the backend and RAG agree"
+        }
         $procs += Start-Process -FilePath "python" `
             -ArgumentList "-m","uvicorn","finix_rag.api:app","--host","127.0.0.1","--port","8000" `
             -RedirectStandardOutput $ragLog -RedirectStandardError "$ragLog.err" -NoNewWindow -PassThru
-        if (Wait-Healthy "http://127.0.0.1:8000/health" 40) {
+        # ~75s observed: embedding model load plus guardrails parsing.
+        if (Wait-Healthy "http://127.0.0.1:8000/health" 150) {
             Good "finix-rag healthy on :8000"
             $env:AI_PROVIDER = "remote"
             $env:AIML_UPSTREAM_URL = "http://127.0.0.1:8000"
