@@ -12,7 +12,11 @@ import (
 )
 
 type SeedUser struct {
-	Name          string
+	Name string
+	// CKYC is the 10-digit Central KYC number the demo signs in with.
+	// Assigned sequentially from 2000000001 so the numbers are easy to read out
+	// during a demo and stay stable across restarts.
+	CKYC          string
 	Mobile        string
 	PIN           string
 	Email         string
@@ -92,7 +96,7 @@ func seedUsers() []SeedUser {
 	now := time.Now().UTC()
 	return []SeedUser{
 		{
-			Name: "Jiyad", Mobile: "+919983692606", PIN: "123456", Email: "jiyad@finix.app",
+			Name: "Jiyad", CKYC: "2000000001", Mobile: "+919983692606", PIN: "123456", Email: "jiyad@finix.app",
 			NetWorthLakhs: 85, BankName: "State Bank of India", IFSC: "SBIN0001234",
 			AccountType: "savings", BalancePaise: 35000000, UPIID: "jiyad@sbi",
 			PANLast4: "1234", AadhaarLast4: "1234", Occupation: "Software Engineer", AnnualIncome: "2400000",
@@ -132,7 +136,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Venkat", Mobile: "+916303891930", PIN: "123456", Email: "venkat@finix.app",
+			Name: "Venkat", CKYC: "2000000002", Mobile: "+916303891930", PIN: "123456", Email: "venkat@finix.app",
 			NetWorthLakhs: 45, BankName: "ICICI Bank", IFSC: "ICIC0000456",
 			AccountType: "savings", BalancePaise: 28000000, UPIID: "venkat@icici",
 			PANLast4: "5678", AadhaarLast4: "5678", Occupation: "Business Analyst", AnnualIncome: "1800000",
@@ -168,7 +172,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "RD Shubham", Mobile: "+918175065652", PIN: "123456", Email: "shubham@finix.app",
+			Name: "RD Shubham", CKYC: "2000000003", Mobile: "+918175065652", PIN: "123456", Email: "shubham@finix.app",
 			NetWorthLakhs: 120, BankName: "Kotak Mahindra Bank", IFSC: "KKBK0007789",
 			AccountType: "savings", BalancePaise: 60000000, UPIID: "shubham@oksbi",
 			PANLast4: "9012", AadhaarLast4: "9012", Occupation: "Investment Banker", AnnualIncome: "4500000",
@@ -215,7 +219,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Arjun Reddy", Mobile: "+919876543210", PIN: "123456", Email: "arjun@finix.app",
+			Name: "Arjun Reddy", CKYC: "2000000004", Mobile: "+919876543210", PIN: "123456", Email: "arjun@finix.app",
 			NetWorthLakhs: 15, BankName: "Punjab National Bank", IFSC: "PUNB0001234",
 			AccountType: "savings", BalancePaise: 12000000, UPIID: "arjun@pnb",
 			PANLast4: "3456", AadhaarLast4: "3456", Occupation: "Teacher", AnnualIncome: "600000",
@@ -240,7 +244,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Priya Sharma", Mobile: "+919876543211", PIN: "123456", Email: "priya@finix.app",
+			Name: "Priya Sharma", CKYC: "2000000005", Mobile: "+919876543211", PIN: "123456", Email: "priya@finix.app",
 			NetWorthLakhs: 55, BankName: "HDFC Bank", IFSC: "HDFC0004321",
 			AccountType: "savings", BalancePaise: 40000000, UPIID: "priya@hdfc",
 			PANLast4: "4567", AadhaarLast4: "4567", Occupation: "Doctor", AnnualIncome: "3200000",
@@ -274,7 +278,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Karthik Iyer", Mobile: "+919876543212", PIN: "123456", Email: "karthik@finix.app",
+			Name: "Karthik Iyer", CKYC: "2000000006", Mobile: "+919876543212", PIN: "123456", Email: "karthik@finix.app",
 			NetWorthLakhs: 28, BankName: "AXIS Bank", IFSC: "UTIB0000987",
 			AccountType: "savings", BalancePaise: 22000000, UPIID: "karthik@axis",
 			PANLast4: "5678", AadhaarLast4: "5678", Occupation: "Marketing Manager", AnnualIncome: "1500000",
@@ -301,7 +305,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Sneha Patel", Mobile: "+919876543213", PIN: "123456", Email: "sneha@finix.app",
+			Name: "Sneha Patel", CKYC: "2000000007", Mobile: "+919876543213", PIN: "123456", Email: "sneha@finix.app",
 			NetWorthLakhs: 72, BankName: "Bank of India", IFSC: "BKID0005678",
 			AccountType: "savings", BalancePaise: 45000000, UPIID: "sneha@boi",
 			PANLast4: "6789", AadhaarLast4: "6789", Occupation: "Pharmacist", AnnualIncome: "2800000",
@@ -335,7 +339,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Ravi Kumar", Mobile: "+919876543214", PIN: "123456", Email: "ravi@finix.app",
+			Name: "Ravi Kumar", CKYC: "2000000008", Mobile: "+919876543214", PIN: "123456", Email: "ravi@finix.app",
 			NetWorthLakhs: 8, BankName: "Canara Bank", IFSC: "CNRB0003456",
 			AccountType: "savings", BalancePaise: 6000000, UPIID: "ravi@canara",
 			PANLast4: "7890", AadhaarLast4: "7890", Occupation: "Graduate Student", AnnualIncome: "350000",
@@ -358,7 +362,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Ananya Gupta", Mobile: "+919876543215", PIN: "123456", Email: "ananya@finix.app",
+			Name: "Ananya Gupta", CKYC: "2000000009", Mobile: "+919876543215", PIN: "123456", Email: "ananya@finix.app",
 			NetWorthLakhs: 95, BankName: "ICICI Bank", IFSC: "ICIC0000789",
 			AccountType: "savings", BalancePaise: 55000000, UPIID: "ananya@icici",
 			PANLast4: "8901", AadhaarLast4: "8901", Occupation: "Tech Entrepreneur", AnnualIncome: "6000000",
@@ -393,7 +397,7 @@ func seedUsers() []SeedUser {
 			},
 		},
 		{
-			Name: "Mohammed Ali", Mobile: "+919876543216", PIN: "123456", Email: "ali@finix.app",
+			Name: "Mohammed Ali", CKYC: "2000000010", Mobile: "+919876543216", PIN: "123456", Email: "ali@finix.app",
 			NetWorthLakhs: 38, BankName: "Union Bank of India", IFSC: "UBIN0005678",
 			AccountType: "savings", BalancePaise: 30000000, UPIID: "ali@unionbank",
 			PANLast4: "9012", AadhaarLast4: "9012", Occupation: "Government Employee", AnnualIncome: "1200000",
@@ -450,12 +454,16 @@ func (s *Service) SeedDemoUsers() error {
 
 		user := &User{
 			ID: userID, Name: su.Name, Mobile: su.Mobile, Email: su.Email,
-			UBT: ubt, EKYCVerified: true, BiometricEnabled: true,
+			CKYC: su.CKYC,
+			UBT:  ubt, EKYCVerified: true, BiometricEnabled: true,
 			DeviceBound: true, SIMBound: simBound, NudgePreference: "moderate",
 			KIN: security.GenerateKIN(su.AadhaarLast4, su.PANLast4), CreatedAt: now,
 		}
 		s.users[userID] = user
 		s.mobileIndex[su.Mobile] = userID
+		if su.CKYC != "" {
+			s.ckycIndex[su.CKYC] = userID
+		}
 
 		pinHash, _ := HashPIN(su.PIN)
 
@@ -645,6 +653,12 @@ func (s *Service) SeedDemoUsers() error {
 	}
 
 	log.Printf("[SEED] Seeded %d demo users with full portfolios", len(users))
+	// Print the login handles so a demo can read them straight off the console
+	// instead of digging through source.
+	log.Printf("[SEED] Sign in with CKYC + PIN (all demo PINs are %q):", "123456")
+	for _, su := range users {
+		log.Printf("[SEED]   %-14s CKYC %s", su.Name, su.CKYC)
+	}
 	return nil
 }
 

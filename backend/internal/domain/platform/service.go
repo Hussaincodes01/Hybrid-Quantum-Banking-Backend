@@ -35,11 +35,15 @@ import (
 )
 
 type User struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Mobile           string    `json:"mobile"`
-	Email            string    `json:"email,omitempty"`
-	KIN              string    `json:"kin,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Mobile string `json:"mobile"`
+	Email  string `json:"email,omitempty"`
+	// CKYC is the 10-digit Central KYC identifier. It is the customer-facing
+	// login handle: the app signs in with CKYC + PIN rather than a phone number,
+	// so a demo does not depend on any real mobile number.
+	CKYC string `json:"ckyc,omitempty"`
+	KIN  string `json:"kin,omitempty"`
 	UBT              string    `json:"ubt"`
 	EKYCVerified     bool      `json:"ekycVerified"`
 	BiometricEnabled bool      `json:"biometricEnabled"`
@@ -787,6 +791,8 @@ type Service struct {
 	bankConnections    map[string]BankConnectionStatus
 	realtimeDetections map[string][]RealtimeDetectionResult
 	mobileIndex        map[string]string
+	// ckycIndex resolves a 10-digit CKYC number to a user ID for login.
+	ckycIndex map[string]string
 	sessions           map[string]string
 	sessionStart       map[string]time.Time
 	sessionExpiry      map[string]time.Time
@@ -874,6 +880,7 @@ func NewService() *Service {
 		bankConnections:     make(map[string]BankConnectionStatus),
 		realtimeDetections:  make(map[string][]RealtimeDetectionResult),
 		mobileIndex:         make(map[string]string),
+		ckycIndex:           make(map[string]string),
 		sessions:            make(map[string]string),
 		sessionStart:        make(map[string]time.Time),
 		sessionExpiry:       make(map[string]time.Time),
@@ -1192,11 +1199,16 @@ func (s *Service) Register(req RegisterRequest) (RegisterResponse, error) {
 		}
 	}
 
+	// Every account gets a 10-digit CKYC number: it is the handle the app logs
+	// in with, so one must exist from registration onward.
+	ckyc := s.allocateCKYCLocked()
+
 	user := &User{
 		ID:               userID,
 		Name:             req.Name,
 		Mobile:           req.Mobile,
 		Email:            req.Email,
+		CKYC:             ckyc,
 		UBT:              ubt,
 		EKYCVerified:     false,
 		BiometricEnabled: false,
@@ -1206,6 +1218,7 @@ func (s *Service) Register(req RegisterRequest) (RegisterResponse, error) {
 		CreatedAt:        now,
 	}
 	s.users[userID] = user
+	s.ckycIndex[ckyc] = userID
 	pinHash := ""
 	if req.PIN != "" {
 		if h, err := HashPIN(req.PIN); err == nil {

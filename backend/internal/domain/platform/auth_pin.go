@@ -2,14 +2,43 @@ package platform
 
 import (
 	"errors"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
+// ckycPattern is the 10-digit Central KYC number format used for login.
+var ckycPattern = regexp.MustCompile(`^\d{10}$`)
+
+// ckycAllocationBase is where CKYC numbers for accounts created at runtime
+// start. It sits above the block used by the demo seed users (2000000001+) so
+// a newly registered account can never collide with a seeded one.
+const ckycAllocationBase = 3000000001
+
+// allocateCKYCLocked returns an unused 10-digit CKYC number.
+// Caller must hold s.mu.
+func (s *Service) allocateCKYCLocked() string {
+	if s.ckycIndex == nil {
+		s.ckycIndex = make(map[string]string)
+	}
+	for n := ckycAllocationBase; n <= 9999999999; n++ {
+		candidate := strconv.Itoa(n)
+		if _, taken := s.ckycIndex[candidate]; !taken {
+			return candidate
+		}
+	}
+	return ""
+}
+
 type PinLoginRequest struct {
 	Mobile string `json:"mobile"`
+	// CKYC is the 10-digit Central KYC number and is the primary login handle
+	// for the app: users sign in with CKYC + PIN, so no real phone number is
+	// needed. Mobile and UserID remain accepted for existing callers.
+	CKYC string `json:"ckyc,omitempty"`
 	// UserID is an alternative to Mobile: the Flutter client keeps the userId
 	// returned by /v1/auth/register and logs in with {userId, pin}. Either
 	// identifier resolves the same account.
@@ -26,6 +55,8 @@ type PinLoginResponse struct {
 	ExpiresIn   int    `json:"expiresInSeconds"`
 	Name        string `json:"name"`
 	UBT         string `json:"ubt"`
+	// CKYC is echoed back so the client can show which identity signed in.
+	CKYC string `json:"ckyc,omitempty"`
 }
 
 func HashPIN(pin string) (string, error) {
@@ -45,14 +76,18 @@ func VerifyPIN(hashedPIN, pin string) bool {
 
 func (s *Service) LoginWithPIN(req PinLoginRequest) (PinLoginResponse, error) {
 	req.Mobile = strings.TrimSpace(req.Mobile)
+	req.CKYC = strings.TrimSpace(req.CKYC)
 	req.UserID = strings.TrimSpace(req.UserID)
 	req.PIN = strings.TrimSpace(req.PIN)
 	req.DeviceIDFingerprint = strings.TrimSpace(req.DeviceIDFingerprint)
 
-	// Either identifier is accepted: the mobile number, or the userId the client
-	// stored from /v1/auth/register.
-	if req.Mobile == "" && req.UserID == "" {
-		return PinLoginResponse{}, errors.New("mobile number or userId is required")
+	// Any one identifier is accepted: the 10-digit CKYC number (what the app
+	// asks for), the mobile number, or the userId returned by registration.
+	if req.CKYC == "" && req.Mobile == "" && req.UserID == "" {
+		return PinLoginResponse{}, errors.New("ckyc number, mobile number or userId is required")
+	}
+	if req.CKYC != "" && !ckycPattern.MatchString(req.CKYC) {
+		return PinLoginResponse{}, errors.New("ckyc number must be exactly 10 digits")
 	}
 	if req.PIN == "" {
 		return PinLoginResponse{}, errors.New("PIN is required")
@@ -66,14 +101,19 @@ func (s *Service) LoginWithPIN(req PinLoginRequest) (PinLoginResponse, error) {
 
 	var userID string
 	var ok bool
-	if req.Mobile != "" {
+	switch {
+	case req.CKYC != "":
+		userID, ok = s.ckycIndex[req.CKYC]
+	case req.Mobile != "":
 		userID, ok = s.mobileIndex[req.Mobile]
-	} else {
+	default:
 		// Resolve by userId; presence in the user map is the existence check.
 		_, ok = s.users[req.UserID]
 		userID = req.UserID
 	}
 	if !ok {
+		// Deliberately identical to a wrong-PIN failure so the response cannot
+		// be used to enumerate which CKYC numbers exist.
 		return PinLoginResponse{}, errors.New("invalid credentials")
 	}
 
@@ -157,6 +197,7 @@ func (s *Service) LoginWithPIN(req PinLoginRequest) (PinLoginResponse, error) {
 		ExpiresIn:   900,
 		Name:        user.Name,
 		UBT:         user.UBT,
+		CKYC:        user.CKYC,
 	}, nil
 }
 
