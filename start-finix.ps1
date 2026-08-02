@@ -123,14 +123,47 @@ function Start-Infra([string]$ragDir) {
     }
 }
 
-function Wait-Healthy([string]$url, [int]$seconds) {
+function Wait-Healthy([string]$url, [int]$seconds, $proc = $null) {
+    # $proc lets the caller tie readiness to the process it actually started.
+    # Without it, a health check can be answered by a DIFFERENT server already
+    # holding the port: the new process dies on "address already in use", the
+    # probe still returns 200, and the launcher reports success before the
+    # watchdog notices the exit and tears everything down.
     foreach ($i in 1..$seconds) {
         Start-Sleep -Seconds 1
+        if ($proc -and $proc.HasExited) { return $false }
         try {
             if ((Invoke-WebRequest -Uri $url -TimeoutSec 3 -UseBasicParsing).StatusCode -eq 200) { return $true }
         } catch { }
     }
     return $false
+}
+
+function Clear-Port([int]$portNumber) {
+    # A leftover server from an earlier run keeps the port, so the new one exits
+    # immediately. Reclaim it when it is one of ours; refuse to touch anything
+    # else, since killing an unrelated process would be far worse than stopping.
+    $conns = Get-NetTCPConnection -LocalPort $portNumber -State Listen -ErrorAction SilentlyContinue
+    if (-not $conns) { return $true }
+
+    foreach ($c in $conns) {
+        $proc = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        if ($proc.ProcessName -in @("finix-server", "server", "go")) {
+            Warn "port $portNumber held by a previous run ($($proc.ProcessName), pid $($proc.Id)) - stopping it"
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        } else {
+            Bad "port $portNumber is in use by $($proc.ProcessName) (pid $($proc.Id))"
+            Info "stop it, or start with -Port <other>"
+            return $false
+        }
+    }
+    Start-Sleep -Seconds 2
+    if (Get-NetTCPConnection -LocalPort $portNumber -State Listen -ErrorAction SilentlyContinue) {
+        Bad "port $portNumber is still in use"
+        return $false
+    }
+    return $true
 }
 
 Write-Host ""
@@ -283,6 +316,7 @@ print(','.join(m for m in mods if importlib.util.find_spec(m) is None))
 
 # ── Backend ────────────────────────────────────────────────────────────
 Step "[4/5] backend"
+if (-not (Clear-Port $Port)) { exit 1 }
 $log = Join-Path $env:TEMP "finix-backend.log"
 Push-Location $backendDir
 
@@ -301,8 +335,14 @@ $backend = Start-Process -FilePath $exe `
 $procs += $backend
 Pop-Location
 
-if (-not (Wait-Healthy "http://127.0.0.1:$Port/healthz" 90)) {
-    Bad "backend did not become healthy - see $log.err"
+if (-not (Wait-Healthy "http://127.0.0.1:$Port/healthz" 90 $backend)) {
+    if ($backend.HasExited) {
+        Bad "backend exited during startup (exit code $($backend.ExitCode))"
+        $tail = Get-Content "$log.err", $log -ErrorAction SilentlyContinue | Select-Object -Last 5
+        if ($tail) { $tail | ForEach-Object { Info $_ } }
+    } else {
+        Bad "backend did not become healthy - see $log.err"
+    }
     foreach ($p in $procs) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
     exit 1
 }
