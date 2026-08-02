@@ -1045,6 +1045,42 @@ func intFromMap(m map[string]any, key string) int {
 // corsMiddleware builds the CORS handler for a specific allow-list. The list is
 // per-router instance state (passed in), not package-global, so constructing two
 // routers (e.g. in tests) never accumulates or shares origins.
+// originMatchesPortWildcard supports one pattern form in CORS_ALLOWED_ORIGINS:
+// a trailing ":*" that matches any PORT on an otherwise exact scheme+host, e.g.
+//
+//	http://localhost:*   matches http://localhost:5599, http://localhost:8080
+//	                     but NOT http://localhost.evil.com or https://localhost:1
+//
+// This exists because `flutter run -d chrome` picks a random port each launch,
+// which an exact-match allow-list cannot express. The host and scheme are still
+// compared exactly, so this never widens the policy to another origin — only to
+// other ports of a host that was already trusted.
+func originMatchesPortWildcard(pattern, origin string) bool {
+	prefix, ok := strings.CutSuffix(pattern, ":*")
+	if !ok {
+		return false
+	}
+	rest, ok := strings.CutPrefix(strings.ToLower(origin), strings.ToLower(prefix))
+	if !ok {
+		return false
+	}
+	// Everything after the host must be exactly ":<digits>" — no path, no
+	// userinfo, and no additional host labels.
+	if !strings.HasPrefix(rest, ":") {
+		return false
+	}
+	port := rest[1:]
+	if port == "" {
+		return false
+	}
+	for _, r := range port {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func corsMiddleware(allowed []string) func(http.Handler) http.Handler {
 	// Snapshot so later mutation of the caller's slice can't change policy.
 	origins := append([]string(nil), allowed...)
@@ -1068,6 +1104,10 @@ func corsMiddleware(allowed []string) func(http.Handler) http.Handler {
 					continue
 				}
 				if strings.EqualFold(ao, origin) {
+					explicit = true
+					break
+				}
+				if originMatchesPortWildcard(ao, origin) {
 					explicit = true
 					break
 				}
