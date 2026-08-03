@@ -139,6 +139,21 @@ function Wait-Healthy([string]$url, [int]$seconds, $proc = $null) {
     return $false
 }
 
+function Clear-Ngrok {
+    # A leftover ngrok agent holds the local API on :4040. A second agent then
+    # fails to bind, but the URL probe below reads the *old* agent's tunnel list
+    # and reports success — so the launcher announces a public URL that is not
+    # forwarding to this run's backend. Same false-positive shape as Clear-Port.
+    $stale = Get-Process ngrok -ErrorAction SilentlyContinue
+    if (-not $stale) { return }
+    Warn "an ngrok agent from a previous run is active (pid $($stale.Id -join ', ')) - stopping it"
+    $stale | Stop-Process -Force -ErrorAction SilentlyContinue
+    foreach ($i in 1..10) {
+        Start-Sleep -Milliseconds 300
+        if (-not (Get-Process ngrok -ErrorAction SilentlyContinue)) { break }
+    }
+}
+
 function Clear-Port([int]$portNumber) {
     # A leftover server from an earlier run keeps the port, so the new one exits
     # immediately. Reclaim it when it is one of ours; refuse to touch anything
@@ -354,8 +369,7 @@ $publicUrl = "http://localhost:$Port"
 if ($Tunnel) {
     $ngrok = Get-Command ngrok -ErrorAction SilentlyContinue
     if (-not $ngrok) {
-        $p = Join-Path $env:USERPROFILE "bin
-grok.exe"
+        $p = Join-Path $env:USERPROFILE 'bin\ngrok.exe'
         if (Test-Path $p) { $ngrok = @{ Source = $p } }
     }
     $useNgrok = switch ($TunnelProvider) {
@@ -365,6 +379,7 @@ grok.exe"
     }
 
     if ($useNgrok -and $ngrok) {
+        Clear-Ngrok
         $nlog = Join-Path $env:TEMP "finix-ngrok.log"
         Remove-Item $nlog -ErrorAction SilentlyContinue
         $args = @("http", "$Port", "--log=stdout", "--log-format=json")
@@ -382,7 +397,28 @@ grok.exe"
             } catch { }
         }
         if ($publicUrl -like "https://*") {
+            # Announcing a URL that does not actually reach this backend is
+            # worse than announcing none: an APK is built against it and every
+            # request fails somewhere the user cannot see. Verify end to end.
+            $reachable = $false
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $probe = Invoke-WebRequest "$publicUrl/healthz" -TimeoutSec 20 -UseBasicParsing
+                $reachable = ($probe.StatusCode -eq 200)
+            } catch {
+                $reachable = $false
+                $probeErr = $_.Exception.Message
+            }
+
             Good "public URL: $publicUrl  (ngrok)"
+            if ($reachable) {
+                Good "verified: the public URL reaches this backend"
+            } else {
+                Warn "the tunnel is up but this machine could not fetch $publicUrl/healthz"
+                if ($probeErr) { Info "  $probeErr" }
+                Info "a local web filter (e.g. FortiGuard blocking ngrok) can cause this"
+                Info "while phones on other networks still connect fine - test from one"
+            }
             if (-not $NgrokDomain) {
                 Warn "this hostname is random and changes on restart; an APK built against it"
                 Info "will stop working. Reserve a free static domain at"
