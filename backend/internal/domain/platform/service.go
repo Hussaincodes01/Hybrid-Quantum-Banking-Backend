@@ -24,6 +24,7 @@ import (
 	"FINIX/backend/internal/domain/blockchain"
 	"FINIX/backend/internal/domain/fraud"
 	"FINIX/backend/internal/domain/healthscore"
+	"FINIX/backend/internal/domain/market"
 	"FINIX/backend/internal/domain/security"
 	"FINIX/backend/internal/domain/transaction"
 	"FINIX/backend/internal/infra/ai"
@@ -750,10 +751,14 @@ type FeatureFlag struct {
 }
 
 type NotificationItem struct {
-	ID        string    `json:"id"`
-	Category  string    `json:"category"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
+	ID       string `json:"id"`
+	Category string `json:"category"`
+	Title    string `json:"title"`
+	Body     string `json:"body"`
+	// Severity drives how prominently the app renders an entry:
+	// "info", "warning" or "critical". Additive, so existing consumers that
+	// ignore it are unaffected.
+	Severity  string    `json:"severity"`
 	Read      bool      `json:"read"`
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -818,6 +823,7 @@ type Service struct {
 	fraudReports       []FraudReport
 	riskEngine         transaction.RiskEngine
 	healthCalculator   healthscore.Calculator
+	marketProvider     *market.Provider
 	ledger             *blockchain.Ledger
 	exp                *expandedState
 	chatbot            *ChatbotClient
@@ -906,6 +912,7 @@ func NewService() *Service {
 		fraudReports:        make([]FraudReport, 0, 128),
 		riskEngine:          transaction.NewRiskEngine(),
 		healthCalculator:    healthscore.NewCalculator(),
+		marketProvider:      market.NewProvider(),
 		ledger:              blockchain.NewLedger(),
 		exp:                 newExpandedState(),
 		secretsManager:      NewSecretsManager(),
@@ -1709,6 +1716,8 @@ func (s *Service) Dashboard(userID string) (DashboardResponse, error) {
 
 	netWorth := s.netWorthPaiseLocked(userID)
 	health := s.healthScoreLocked(userID)
+	// Cached; never blocks on the network.
+	marketSnap := s.marketSnapshot()
 
 	return DashboardResponse{
 		Greeting:         fmt.Sprintf("Good morning, %s", user.Name),
@@ -1716,8 +1725,8 @@ func (s *Service) Dashboard(userID string) (DashboardResponse, error) {
 		WeekDeltaPaise:   int64(float64(netWorth) * 0.012),
 		HealthScore:      health.Score300To900,
 		RiskBand:         health.Band,
-		MarketSensex:     75180.42,
-		MarketGoldPer10g: 74250.00,
+		MarketSensex:     marketSnap.Sensex.Value,
+		MarketGoldPer10g: marketSnap.GoldPer10g.Value,
 		FreezeActive:     s.freezeState[userID],
 	}, nil
 }
@@ -2526,13 +2535,29 @@ func (s *Service) MarketSnapshot(userID string) (map[string]any, error) {
 		return nil, errors.New("user not found")
 	}
 
+	snap := s.marketSnapshot()
+
+	// Portfolio impact is this customer's equity exposure moved by today's
+	// index change, rather than a fixed rupee figure shown to everyone.
+	var equityPaise int64
+	for _, h := range s.investments[userID] {
+		if strings.EqualFold(h.Category, "equity") || strings.EqualFold(h.Category, "mutual_fund") {
+			equityPaise += h.CurrentValuePaise
+		}
+	}
+	impact := int64(float64(equityPaise) * snap.Nifty.ChangePercent / 100)
+
 	return map[string]any{
-		"sensex":               75180.42,
-		"nifty":                22831.11,
-		"goldPer10g":           74250.00,
-		"repoRate":             6.50,
-		"portfolioImpactPaise": int64(12450),
-		"xai":                  "Rate-sensitive holdings may benefit from stable policy rates while debt instruments remain attractive.",
+		"sensex":               snap.Sensex.Value,
+		"nifty":                snap.Nifty.Value,
+		"goldPer10g":           snap.GoldPer10g.Value,
+		"repoRate":             snap.RepoRate,
+		"sensexChangePercent":  snap.Sensex.ChangePercent,
+		"niftyChangePercent":   snap.Nifty.ChangePercent,
+		"portfolioImpactPaise": impact,
+		"live":                 snap.Live,
+		"asOf":                 snap.FetchedAt,
+		"xai":                  marketNarrative(snap),
 	}, nil
 }
 
@@ -3896,10 +3921,40 @@ func (s *Service) FeatureFlags(userID string) []FeatureFlag {
 	return append([]FeatureFlag(nil), flags...)
 }
 
+// NotificationCentre returns the customer's feed: anything pushed here by the
+// platform, merged with entries derived from their own activity.
+//
+// Nothing ever wrote to notificationCenter, so this always returned an empty
+// array and the app fell back to a hardcoded list of notices shown identically
+// to every account. Derived entries carry stable IDs, so a dismissal recorded
+// against one keeps it dismissed on later reads.
 func (s *Service) NotificationCentre(userID string, page, limit int) ([]NotificationItem, error) {
+	// Computed before notifMu is taken: derivedNotifications acquires the main
+	// read lock, and holding both at once would invite a lock-order deadlock.
+	derived := s.derivedNotifications(userID)
+
 	s.notifMu.Lock()
 	defer s.notifMu.Unlock()
-	items := s.notificationCenter[userID]
+
+	stored := s.notificationCenter[userID]
+	storedIDs := make(map[string]bool, len(stored))
+	for _, item := range stored {
+		storedIDs[item.ID] = true
+	}
+
+	items := append([]NotificationItem(nil), stored...)
+	for _, d := range derived {
+		// A stored copy is authoritative — it carries the read/dismiss state.
+		if storedIDs[d.ID] {
+			continue
+		}
+		items = append(items, d)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].CreatedAt.After(items[j].CreatedAt)
+	})
+
 	if limit <= 0 {
 		limit = 20
 	}
@@ -3918,6 +3973,8 @@ func (s *Service) NotificationCentre(userID string, page, limit int) ([]Notifica
 }
 
 func (s *Service) DismissNotification(userID, notificationID string) error {
+	derived := s.derivedNotifications(userID)
+
 	s.notifMu.Lock()
 	defer s.notifMu.Unlock()
 	items := s.notificationCenter[userID]
@@ -3928,6 +3985,18 @@ func (s *Service) DismissNotification(userID, notificationID string) error {
 			return nil
 		}
 	}
+
+	// Derived entries are computed on each read rather than stored, so there is
+	// no row to flip. Persist a read copy instead, otherwise dismissing one
+	// would appear to work and it would reappear on the next refresh.
+	for _, d := range derived {
+		if d.ID == notificationID {
+			d.Read = true
+			s.notificationCenter[userID] = append(items, d)
+			return nil
+		}
+	}
+
 	return errors.New("notification not found")
 }
 
@@ -4175,32 +4244,64 @@ func (s *Service) totalLiabilityPaiseLocked(userID string) int64 {
 	return total
 }
 
+// healthScoreLocked scores the customer from their own data.
+//
+// Every input except debt-to-income used to be a literal here (emergency fund
+// 4.5 months, savings rate 0.24, diversification 72, protection 68, behaviour
+// 74, and a fixed six-month history), so every customer scored within a point
+// or two of the same number and the score never moved when they transacted.
+// The arithmetic now lives in healthscore.Derive, which is pure and tested;
+// this function's only job is to gather the facts.
 func (s *Service) healthScoreLocked(userID string) healthscore.Result {
-	totalDebt := s.totalLiabilityPaiseLocked(userID)
-	totalAssets := s.totalAssetPaiseLocked(userID)
-	dti := 0.0
-	if totalAssets > 0 {
-		dti = float64(totalDebt) / float64(totalAssets+totalDebt)
+	facts := healthscore.Facts{
+		Now:                 time.Now(),
+		LiquidBalancePaise:  s.totalBalanceLocked(userID),
+		InsuranceCoverPaise: 0,
+		LiabilitiesPaise:    s.totalLiabilityPaiseLocked(userID),
 	}
 
-	emergencyFundMonths := 4.5
-	savingsRate := 0.24
-	goalOnTrack := 0.7
-	if len(s.goals[userID]) == 0 {
-		goalOnTrack = 0.5
+	for _, t := range s.transactions[userID] {
+		// Only settled money movement counts; a pending or failed payment has
+		// not changed what the customer actually has.
+		if t.Status != "" && t.Status != "success" && t.Status != "completed" {
+			continue
+		}
+		facts.Transactions = append(facts.Transactions, healthscore.TxnFact{
+			AmountPaise: t.AmountPaise,
+			Credit:      strings.EqualFold(t.DebitCredit, "credit"),
+			At:          t.CreatedAt,
+		})
 	}
 
-	res := s.healthCalculator.Calculate(healthscore.Input{
-		EmergencyFundMonths:     emergencyFundMonths,
-		DebtToIncomeRatio:       dti,
-		SavingsRate:             savingsRate,
-		DiversificationScore:    72,
-		InsuranceCoverageScore:  68,
-		GoalOnTrackRatio:        goalOnTrack,
-		BehaviourQualityScore:   74,
-		MonthlyHistoricalScores: []float64{62, 64, 66, 69, 71, 73},
-	})
-	return res
+	for _, h := range s.investments[userID] {
+		facts.Investments = append(facts.Investments, healthscore.HoldingFact{
+			Category:          h.Category,
+			CurrentValuePaise: h.CurrentValuePaise,
+		})
+	}
+
+	for _, p := range s.insurance[userID] {
+		facts.InsuranceCoverPaise += p.SumAssuredPaise
+	}
+
+	for _, l := range s.loans[userID] {
+		facts.MonthlyEMIPaise += l.EMIPaise
+	}
+
+	for _, g := range s.goals[userID] {
+		if g.Status != "" && g.Status != "active" {
+			continue
+		}
+		facts.Goals = append(facts.Goals, healthscore.GoalFact{
+			SavedPaise:  g.SavedAmountPaise,
+			TargetPaise: g.TargetAmountPaise,
+			Priority:    g.Priority,
+			StartDate:   g.StartDate,
+			TargetDate:  g.TargetDate,
+		})
+	}
+
+	return s.healthCalculator.Calculate(healthscore.Derive(facts))
 }
 
 func historicalAverageAmount(history []Transaction) float64 {
@@ -4604,4 +4705,45 @@ func calculateNewRegimeTax(taxableIncomePaise int64) int64 {
 	}
 	cess := (tax + surcharge) * 4 / 100
 	return tax + surcharge + cess
+}
+
+
+// marketSnapshot reads the cached index levels. The provider refreshes in the
+// background, so this is a lock-free read and cannot stall a request.
+func (s *Service) marketSnapshot() market.Snapshot {
+	if s.marketProvider == nil {
+		return market.Snapshot{}
+	}
+	return s.marketProvider.Snapshot()
+}
+
+// StartMarketFeed begins background refreshes of index data. Called once at
+// startup; safe to call more than once.
+func (s *Service) StartMarketFeed() {
+	if s.marketProvider != nil {
+		s.marketProvider.Start()
+	}
+}
+
+// StopMarketFeed stops the refresh goroutine.
+func (s *Service) StopMarketFeed() {
+	if s.marketProvider != nil {
+		s.marketProvider.Close()
+	}
+}
+
+// marketNarrative describes what the indices actually did, instead of the one
+// fixed sentence every customer used to receive regardless of the market.
+func marketNarrative(snap market.Snapshot) string {
+	if !snap.Live {
+		return "Live market data is unavailable right now; the levels shown are the last known reference values."
+	}
+	switch {
+	case snap.Nifty.ChangePercent >= 1:
+		return fmt.Sprintf("Nifty is up %.2f%% today. Broad-based strength tends to lift equity holdings; avoid chasing a single session.", snap.Nifty.ChangePercent)
+	case snap.Nifty.ChangePercent <= -1:
+		return fmt.Sprintf("Nifty is down %.2f%% today. Falls of this size are routine, and selling into them usually locks in the loss.", -snap.Nifty.ChangePercent)
+	default:
+		return fmt.Sprintf("Markets are broadly flat, with Nifty %+.2f%%. Little reason to act on a quiet session.", snap.Nifty.ChangePercent)
+	}
 }

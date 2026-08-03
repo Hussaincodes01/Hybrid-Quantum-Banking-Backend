@@ -35,7 +35,7 @@ func (Calculator) Calculate(input Input) Result {
 	pillars := []Pillar{
 		{Name: "Liquidity", Weight: 0.18, Score: liquidityScore(input.EmergencyFundMonths)},
 		{Name: "DebtHealth", Weight: 0.18, Score: debtScore(input.DebtToIncomeRatio)},
-		{Name: "SavingsBehaviour", Weight: 0.15, Score: ratioScore(input.SavingsRate, 0.35)},
+		{Name: "SavingsBehaviour", Weight: 0.15, Score: ratioScore(input.SavingsRate, savingsRateTarget)},
 		{Name: "InvestmentQuality", Weight: 0.15, Score: clamp(input.DiversificationScore, 0, 100)},
 		{Name: "ProtectionCoverage", Weight: 0.15, Score: clamp(input.InsuranceCoverageScore, 0, 100)},
 		{Name: "GoalAlignment", Weight: 0.12, Score: ratioScore(input.GoalOnTrackRatio, 1.0)},

@@ -232,6 +232,11 @@ func NewRouter(dbPool any, opts ...RouterOption) http.Handler {
 	}
 	svc.UseModelParams(modelParams)
 
+	// Begin polling live index levels. The first fetch happens in the
+	// background, so startup is not delayed and an unreachable upstream leaves
+	// the seeded reference levels in place rather than failing the boot.
+	svc.StartMarketFeed()
+
 	// Attach Hyperledger Fabric as the ledger's system of record before any
 	// seeding, so seeded events are written on-chain too.
 	if options.fabricLedger != nil {
