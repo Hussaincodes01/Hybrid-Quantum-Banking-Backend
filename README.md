@@ -281,8 +281,8 @@ FINIX_PRODUCTION/
 
 | Role | Permissions | Users |
 |------|-------------|-------|
-| **Owner** | Full write access, merge to main | **@Akshit Kumar** |
-| **Maintainer** | Write to feature branches, create PRs | **@Akshit Kumar** |
+| **Owner** | Full write access, merge to main | **Jiyad Hussain** |
+| **Maintainer** | Write to feature branches, create PRs | **Gradient** |
 | **Collaborator** | Read-only, assigned modules only | Assigned team members |
 | **External** | No access | N/A |
 
